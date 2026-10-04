@@ -3,6 +3,7 @@ import { copyText } from '@/client/clipboard.js';
 import { api } from '@/client/api.js';
 import { clearWordFocus, focusedWord, moveWord, moveWordToEdge, scrollCursorInline } from '@/client/lsp/wordNav.js';
 import { currentPath, MODE_PANES } from '@/client/model.js';
+import { useRendered, type RenderedState } from '@/client/rendered/state.js';
 import { remPx } from '@/client/scale.js';
 import { escapeRegex } from '@/client/search/highlight.js';
 import { useStore, type ReviewState } from '@/client/store.js';
@@ -96,6 +97,11 @@ const KEYMAP: Record<string, Action> = {
   ...Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => [`i${n}`, (s: ReviewState) => s.pickIteration(n)])),
   r: (s) => s.reloadIfMoved(),
   '?': (s) => s.setHelpOpen(!s.helpOpen),
+  p: (s) => {
+    const r = useRendered.getState();
+    if (!r.doc) return s.flash('No rendered document: start diffle with --typst <entry>');
+    r.setView(r.view === 'source' ? 'rendered' : 'source');
+  },
 };
 
 /** The page's text selection, else the focused word (`w`), as a search query: one line only, escaped when regex search is on. */
@@ -104,6 +110,16 @@ function selectedQuery(s: ReviewState): string | undefined {
   if (!text || text.includes('\n')) return undefined;
   return s.search.regex ? escapeRegex(text) : text;
 }
+
+/** Keys the rendered view takes over while it covers the diff; the rest keep their meaning. */
+const RENDERED_KEYMAP: Record<string, (r: RenderedState) => unknown> = {
+  j: (r) => r.moveChange(1),
+  n: (r) => r.moveChange(1),
+  ']': (r) => r.moveChange(1),
+  k: (r) => r.moveChange(-1),
+  N: (r) => r.moveChange(-1),
+  '[': (r) => r.moveChange(-1),
+};
 
 /** Real target, looking through shadow roots (the tree and diffs retarget events to their hosts). */
 function realTarget(e: Event): HTMLElement | null {
@@ -164,6 +180,7 @@ export function useKeymap(): void {
         target.getAttribute('aria-expanded') === 'true'
       )
         return;
+      const rendered = useRendered.getState();
       if (e.key === 'Escape') {
         // Leaving a configuration pane returns to the entry list, not the diff.
         if (s.modePane && !s.helpOpen) {
@@ -300,6 +317,16 @@ export function useKeymap(): void {
         }
       }
       if (s.modeMenuOpen && target?.closest('#mode-picker')) return;
+      if (rendered.view !== 'source' && !pending.current && !s.helpOpen && !s.modeMenuOpen) {
+        const act = RENDERED_KEYMAP[e.key];
+        if (act) {
+          e.preventDefault();
+          act(rendered);
+          return;
+        }
+        // Arrows scroll the pages natively; the hidden diff's cursor must not move under them.
+        if (e.key.startsWith('Arrow')) return;
+      }
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
         const dir = e.key === 'ArrowDown' ? 1 : -1;

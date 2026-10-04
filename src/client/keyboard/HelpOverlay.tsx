@@ -50,6 +50,13 @@ export const COLUMNS: HelpSection[][] = [
         ['yp', 'copy the current file’s path'],
       ],
     },
+    {
+      title: 'Rendered document (--typst)',
+      rows: [
+        ['p', 'switch between the source diff and the rendered pages'],
+        ['j / k  ] / [  n / N', 'next / previous rendered change'],
+      ],
+    },
   ],
   [
     {

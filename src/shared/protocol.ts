@@ -377,6 +377,17 @@ export const FileAnchorSchema = z.object({
 });
 export type FileAnchor = z.infer<typeof FileAnchorSchema>;
 
+/** A box on a rendered page, in fractions of the page's width and height from its top left. */
+export const PdfRectSchema = z.object({
+  /** 1-based. */
+  page: z.number().int().positive(),
+  x: z.number(),
+  y: z.number(),
+  w: z.number(),
+  h: z.number(),
+});
+export type PdfRect = z.infer<typeof PdfRectSchema>;
+
 export const CommentAnchorSchema = z.discriminatedUnion('kind', [LineAnchorSchema, FileAnchorSchema]);
 export type CommentAnchor = z.infer<typeof CommentAnchorSchema>;
 
@@ -765,6 +776,51 @@ export type LspSymbol = z.infer<typeof LspSymbolSchema>;
 /** `GET /api/lsp/symbols`: a file's outline with `path`, else the repository's symbols matching `q`. */
 export const LspSymbolsResponseSchema = z.object({ symbols: LspSymbolSchema.array(), inconclusive });
 export type LspSymbolsResponse = z.infer<typeof LspSymbolsResponseSchema>;
+/** One side of the rendered document. */
+export const RenderedSideSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ready'),
+    /** Names the PDF's bytes; `/api/document/pdf` serves it under this key. */
+    key: z.string(),
+    /** Page sizes in PDF points. */
+    pages: z.object({ width: z.number(), height: z.number() }).array(),
+  }),
+  /** The compiler refused this side; `message` is its diagnostics. */
+  z.object({ state: z.literal('failed'), message: z.string() }),
+  /** The entry file does not exist on this side. */
+  z.object({ state: z.literal('absent') }),
+]);
+export type RenderedSide = z.infer<typeof RenderedSideSchema>;
+
+/**
+ * One changed passage: what left the old render and what replaced it in the new one. A side with no
+ * words has one zero-width rect, a caret where the other side's words would sit.
+ */
+export const RenderedChangeSchema = z.object({
+  old: PdfRectSchema.array(),
+  new: PdfRectSchema.array(),
+  /** The words each side's rects cover, joined by spaces. */
+  oldText: z.string(),
+  newText: z.string(),
+});
+export type RenderedChange = z.infer<typeof RenderedChangeSchema>;
+
+/** `GET /api/document`: the `--typst` document compiled on both sides, and where their text differs. */
+export const RenderedDocumentSchema = z.object({
+  entry: z.string(),
+  /** Snapshot.version the sides were rendered from. */
+  version: z.number(),
+  /** A newer snapshot is being rendered; the sides still show `version`. */
+  rendering: z.boolean(),
+  /** Null until the first render of the session finishes. */
+  old: RenderedSideSchema.nullable(),
+  new: RenderedSideSchema.nullable(),
+  /** In reading order of the new side. Empty unless both sides are ready. */
+  changes: RenderedChangeSchema.array(),
+});
+export type RenderedDocument = z.infer<typeof RenderedDocumentSchema>;
+
+export const DocumentPdfQuerySchema = z.object({ rev: SideSchema, key: z.string().min(1) });
 
 /** Derived per changed file: 'restale' means viewed at an older blob. */
 export const ViewedStateSchema = z.enum(['unviewed', 'viewed', 'restale']);
@@ -792,6 +848,10 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('lsp'),
     payload: LspStatusSchema,
+  }),
+  /** The rendered document changed state; clients refetch `/api/document`. */
+  z.object({
+    type: z.literal('document'),
   }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;

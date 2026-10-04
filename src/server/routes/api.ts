@@ -23,12 +23,14 @@ import { GithubError } from '@/server/github/client.js';
 import { imageType } from '@/server/image.js';
 import { LspUnavailableError } from '@/server/lsp/LspProcess.js';
 import type { LspPool } from '@/server/lsp/LspPool.js';
+import type { RenderPipeline } from '@/server/render/RenderPipeline.js';
 import { RevspecError } from '@/server/mode/revspec.js';
 import type { Session } from '@/server/Session.js';
 import type { UserConfigStore } from '@/server/UserConfig.js';
 import type { WsHub } from '@/server/ws.js';
 import { readJson } from './body.js';
 import { commentRoutes } from './comments.js';
+import { documentRoutes } from './document.js';
 import { lspRoutes } from './lsp.js';
 
 export interface ApiDeps {
@@ -39,6 +41,8 @@ export interface ApiDeps {
   hub: WsHub;
   /** The language servers, unless the run disabled them with `--no-lsp`. */
   lsp: LspPool | null;
+  /** The `--typst` document, when the run renders one. */
+  document?: RenderPipeline | null;
 }
 
 export function createApi(deps: ApiDeps): Hono {
@@ -170,6 +174,7 @@ export function createApi(deps: ApiDeps): Hono {
   });
 
   commentRoutes(app, deps);
+  documentRoutes(app, deps);
   lspRoutes(app, deps);
 
   app.get('/api/config', (c) => c.json(effectiveConfig(deps)));

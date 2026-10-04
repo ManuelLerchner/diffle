@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { Argument, Command, CommanderError, Option } from 'commander';
 import { completionHint } from 'commander-static-completion';
 import pkg from '../../package.json' with { type: 'json' };
@@ -6,6 +7,9 @@ import { formatPrompt } from '@/server/comments/format.js';
 import { GitError, GitRepo } from '@/server/git/GitRepo.js';
 import { createGithubClient, type GithubClient, GithubError, resolveToken } from '@/server/github/client.js';
 import { LspPool } from '@/server/lsp/LspPool.js';
+import { findOnPath } from '@/server/lsp/which.js';
+import { RenderPipeline } from '@/server/render/RenderPipeline.js';
+import { TypstRenderer } from '@/server/render/typst/TypstRenderer.js';
 import { resolveServers } from '@/server/lsp/registry.js';
 import { RevspecError } from '@/server/mode/revspec.js';
 import { DEFAULT_PORT, hasClientBuild, Server } from '@/server/Server.js';
@@ -65,6 +69,8 @@ interface GlobalOpts {
   context?: number;
   /** false: `--no-lsp`. true: a bare `--lsp`, which is the default anyway. Else per-language overrides. */
   lsp: boolean | LspOverride[];
+  /** Entry file of a Typst document to render on both sides, as given. */
+  typst?: string;
 }
 
 const program = new Command()
@@ -109,6 +115,16 @@ const program = new Command()
       .default(true, "the diff's languages, resolved on PATH"),
   )
   .option('--no-lsp', 'do not start any language server')
+  .addOption(
+    completionHint(
+      new Option(
+        '--typst <entry>',
+        "compile this Typst document on both sides and review the rendered pages (runs typst, and the document's packages and plugins, on the reviewed files)",
+      ),
+      { kind: 'file' },
+    ),
+  )
+
   .option('--timing', 'print startup phase timings to stderr')
   .option('--dev', 'serve the client through Vite (development)', process.env.DIFFLE_DEV === '1' ? true : undefined)
   .addArgument(
@@ -320,14 +336,20 @@ async function run(req: EntryRequest, opts: GlobalOpts): Promise<void> {
   try {
     const github = await connectGithub();
     timing.mark('github token');
-    review = await openReviewRepository(req, opts.C ?? process.cwd(), github.client);
+    const cwd = opts.C ?? process.cwd();
+    review = await openReviewRepository(req, cwd, github.client);
     timing.mark('open repository');
+    const typst = opts.typst == null ? null : relative(review.repo.root, resolve(cwd, opts.typst)).split(sep).join('/');
+    if (typst != null && (!typst || typst.startsWith('..') || isAbsolute(typst))) {
+      await review.close();
+      program.error(`--typst ${opts.typst} is not a file in the repository`, { exitCode: 2 });
+    }
     const config = await UserConfigStore.open();
     if (interrupted) {
       await review.close();
       return;
     }
-    await serve(req, opts, review.repo, review.close, config, github, timing);
+    await serve(req, opts, review.repo, review.close, config, github, timing, typst);
   } catch (e) {
     await review?.close();
     throw e;
@@ -345,6 +367,7 @@ async function serve(
   config: UserConfigStore,
   github: ConnectedGithub,
   timing: Timing,
+  typst: string | null,
 ): Promise<void> {
   const hub = new WsHub();
   const session = new Session(repo, hub, {
@@ -353,6 +376,8 @@ async function serve(
     followRefs: config.get().followRefs,
     github: github.client ?? undefined,
   });
+  // Subscribes before the first snapshot, so the first render starts with it.
+  const document = typst == null ? null : new RenderPipeline(session, hub, typst, new TypstRenderer());
   // A `--lsp` override outranks the config and starts its server whatever the diff holds.
   const named = Array.isArray(opts.lsp) ? opts.lsp : [];
   const overrides = { ...config.get().lspCommands, ...Object.fromEntries(named.map((o) => [o.language, o.command])) };
@@ -367,7 +392,7 @@ async function serve(
           named.map((o) => o.language),
         );
   const server = new Server(
-    { session, config, extraAutoViewed: opts.autoViewed, hub, lsp },
+    { session, config, extraAutoViewed: opts.autoViewed, hub, lsp, document },
     {
       port: opts.port ?? DEFAULT_PORT,
       probe: opts.port == null,
@@ -440,6 +465,12 @@ async function serve(
       console.error(
         `👀 ${c.dim(snap.mode.live === 'worktree' ? 'watching the worktree' : session.follows ? 'watching refs' : 'watching refs; moved refs show a Reload button')}${opts.watch ? '' : c.dim(' (disabled with --no-watch)')}`,
       );
+    if (document) {
+      const found = findOnPath('typst') != null;
+      console.error(
+        `📄 ${c.dim('typst')} ${document.entry}${found ? '' : ` ${c.yellow('(typst is not on PATH: nothing will render)')}`}`,
+      );
+    }
     if (lsp) {
       const { servers, missing } = lsp.status();
       const names = servers.map((s) => `${s.name} ${c.dim(`(${languagesLabel(s)})`)}`).join(', ');

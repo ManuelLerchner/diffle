@@ -145,6 +145,23 @@ diffle working --no-lsp                          # none at all
 Language servers run through a shell inside the repository and can read anything your user can.
 `--no-lsp` starts none.
 
+## Review a rendered Typst document
+
+```bash
+diffle main --typst thesis/main.typ
+```
+
+diffle compiles the document on both sides of the comparison with
+[`typst`](https://typst.app/) from `PATH` and shows the new pages with the words an edit added
+tinted green and a red mark in the margin where words were removed. `p` switches between the
+rendered pages and the source diff, **Both** shows them side by side, and `j` / `k` step through
+the changes.
+
+Each side compiles from a copy of the entry's directory as it is on that side, so files outside
+it, and gitignored ones, are not visible. A document can tell such a render apart from its own
+builds by `sys.inputs.diffle`, which diffle sets, for instance to stand in placeholders for
+generated data no revision contains. Compiling runs the document's packages and plugins.
+
 ## Shell completions
 
 ```bash

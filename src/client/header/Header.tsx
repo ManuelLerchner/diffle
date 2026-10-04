@@ -1,9 +1,13 @@
 import { SegmentedControl, ToggleButton } from '@/client/ui/ToggleButton.js';
 import { Button } from '@/client/ui/Button.js';
 import {
+  CircleAlert,
   Columns2,
+  Code,
+  FileText,
   GitCompareArrows,
   Keyboard,
+  LoaderCircle,
   Monitor,
   Moon,
   PanelLeft,
@@ -14,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { repoName } from '@/client/model.js';
+import { useRendered } from '@/client/rendered/state.js';
 import { useStore } from '@/client/store.js';
 import { nextTheme, type ThemeChoice } from '@/client/theme.js';
 import { CommitStepper } from './CommitStepper.js';
@@ -72,6 +77,7 @@ export function Header() {
         {changed} files · <span className="text-add">+{adds}</span> <span className="text-del">−{dels}</span>
       </span>
       <span className="flex-1" />
+      <RenderedToggle />
       {lsp.enabled && <LspIndicator lsp={lsp} />}
       <SegmentedControl title="Diff layout (s)">
         <ToggleButton selected={diffStyle === 'split'} onClick={() => setDiffStyle('split')} aria-label="Split">
@@ -108,4 +114,33 @@ function ThemeIcon({ choice }: { choice: ThemeChoice }) {
   if (choice === 'light') return <Sun size="1rem" />;
   if (choice === 'dark') return <Moon size="1rem" />;
   return <Monitor size="1rem" />;
+}
+
+/** Source diff, rendered document, or both side by side, when the review has a document. */
+function RenderedToggle() {
+  const doc = useRendered((s) => s.doc);
+  const view = useRendered((s) => s.view);
+  const setView = useRendered((s) => s.setView);
+  if (!doc) return null;
+  const failed = doc.old?.state === 'failed' || doc.new?.state === 'failed';
+  return (
+    <SegmentedControl title={`Show the source diff or the rendered ${doc.entry} (p)`}>
+      <ToggleButton selected={view === 'source'} onClick={() => setView('source')}>
+        <Code size="0.875rem" /> Source
+      </ToggleButton>
+      <ToggleButton
+        selected={view === 'rendered'}
+        onClick={() => setView('rendered')}
+        title={failed ? 'A side did not compile' : undefined}
+      >
+        {doc.rendering ? <LoaderCircle size="0.875rem" className="animate-spin" /> : <FileText size="0.875rem" />}
+        Rendered
+        {failed && <CircleAlert size="0.75rem" className="text-danger" />}
+        {!failed && doc.changes.length > 0 && <span className="text-muted">{doc.changes.length}</span>}
+      </ToggleButton>
+      <ToggleButton selected={view === 'both'} onClick={() => setView('both')} title="Rendered beside the source diff">
+        <Columns2 size="0.875rem" /> Both
+      </ToggleButton>
+    </SegmentedControl>
+  );
 }
