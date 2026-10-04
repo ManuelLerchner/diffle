@@ -4,6 +4,8 @@ import type {
   ChangedFile,
   CommentThread,
   LspLogResponse,
+  FileAnchor,
+  LineAnchor,
   LspServerStatus,
   LspStatus,
   Moved,
@@ -1631,7 +1633,7 @@ describe('symbol navigation', () => {
 });
 
 const thread = (
-  over: Partial<Omit<CommentThread, 'anchor'>> & { anchor?: Partial<CommentThread['anchor']> },
+  over: Partial<Omit<CommentThread, 'anchor'>> & { anchor?: Partial<LineAnchor | FileAnchor> },
 ): CommentThread => ({
   id: over.id ?? 't',
   anchor: { kind: 'line', path: 'a.py', side: 'new', startLine: 1, endLine: 1, quoted: 'x', ...over.anchor },

@@ -267,9 +267,16 @@ function CopyButton({
   );
 }
 
-/** Review order: by path, then line with the file thread first, then creation. */
+/** Review order, as the server's: by path, then the file thread, its lines, the rendered document in reading order; then creation. */
 function cmp(a: CommentThread, b: CommentThread): number {
   if (a.anchor.path !== b.anchor.path) return a.anchor.path < b.anchor.path ? -1 : 1;
-  const line = (x: CommentThread) => (x.anchor.kind === 'line' ? x.anchor.startLine : 0);
-  return line(a) - line(b) || (a.messages[0]?.createdAt ?? 0) - (b.messages[0]?.createdAt ?? 0);
+  const rank = (x: CommentThread): [number, number] => {
+    const an = x.anchor;
+    if (an.kind === 'file') return [0, 0];
+    if (an.kind === 'line') return [1, an.startLine];
+    return [an.side === 'old' ? 2 : 3, an.offset];
+  };
+  const [ka, pa] = rank(a);
+  const [kb, pb] = rank(b);
+  return ka - kb || pa - pb || (a.messages[0]?.createdAt ?? 0) - (b.messages[0]?.createdAt ?? 0);
 }

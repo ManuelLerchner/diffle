@@ -4,7 +4,9 @@ import { compareThreads } from './anchor.js';
 /**
  * Agent-prompt format, one block per thread:
  *
- *   path:line            (or path:start-end; `(file) path` for a thread on the whole file)
+ *   path:line            (or path:start-end; `(file) path` for a thread on the whole file;
+ *                         for the rendered document, the source it traced to and the page,
+ *                         or `(rendered) entry page N` when no source was found)
  *
  *   > quoted line        (absent for a file thread)
  *
@@ -26,17 +28,30 @@ function formatOne(t: CommentThread): string {
     const body = t.messages.map((m) => m.body.trim()).join('\n\n');
     return `${header}\n\n${body}\n\n---\n`;
   }
-  const range = anchor.startLine === anchor.endLine ? `${anchor.startLine}` : `${anchor.startLine}-${anchor.endLine}`;
   const prefixes: string[] = [];
   if (anchor.side === 'old') prefixes.push('(removed)');
-  if (t.stale) prefixes.push(`(stale, was line ${t.staleFromLine ?? anchor.startLine})`);
-  const header = `${prefixes.length ? prefixes.join(' ') + ' ' : ''}${anchor.path}:${range}`;
+  let location: string;
+  if (anchor.kind === 'pdf') {
+    if (t.stale) prefixes.push('(stale)');
+    const where = `page ${anchor.page}${anchor.section ? `, under "${anchor.section}"` : ''}`;
+    const src = anchor.source;
+    location = src
+      ? `${src.path}:${span(src.startLine, src.endLine)} (rendered ${where})`
+      : `(rendered) ${anchor.path} ${where}`;
+  } else {
+    if (t.stale) prefixes.push(`(stale, was line ${t.staleFromLine ?? anchor.startLine})`);
+    location = `${anchor.path}:${span(anchor.startLine, anchor.endLine)}`;
+  }
   const quote = anchor.quoted
     .split('\n')
     .map((l) => (l.length ? `> ${l}` : '>'))
     .join('\n');
   const body = t.messages.map((m) => formatMessage(m, anchor.quoted)).join('\n\n');
-  return `${header}\n\n${quote}\n\n${body}\n\n---\n`;
+  return `${[...prefixes, location].join(' ')}\n\n${quote}\n\n${body}\n\n---\n`;
+}
+
+function span(start: number, end: number): string {
+  return start === end ? `${start}` : `${start}-${end}`;
 }
 
 function formatMessage(m: CommentMessage, quoted: string): string {

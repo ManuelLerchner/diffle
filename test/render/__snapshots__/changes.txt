@@ -1,8 +1,8 @@
 - 
-+ local
++ local (new thesis/main.typ:4)
 
 - computes all
-+ discovers
++ discovers (new thesis/ch/solver.typ:1)
 
 - eagerly
-+ on demand
++ on demand (new thesis/ch/solver.typ:2)

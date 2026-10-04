@@ -55,6 +55,7 @@ export const COLUMNS: HelpSection[][] = [
       rows: [
         ['p', 'switch between the source diff and the rendered pages'],
         ['j / k  ] / [  n / N', 'next / previous rendered change'],
+        ['select text, then c', 'comment on the selected passage'],
       ],
     },
   ],

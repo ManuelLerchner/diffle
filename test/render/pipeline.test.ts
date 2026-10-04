@@ -46,9 +46,18 @@ describe('RenderPipeline with any renderer', () => {
     await rmTmp(dir);
   });
 
-  it('compiles both sides and reports the changed words', () => {
+  it('compiles both sides and reports the changed words, traced to their source line', () => {
     const d = doc.document();
     expect([d.old?.state, d.new?.state]).toEqual(['ready', 'ready']);
-    expect(d.changes.map((c) => [c.oldText, c.newText])).toEqual([['computes all', 'discovers']]);
+    expect(d.changes.map((c) => [c.oldText, c.newText, c.source && `${c.source.path}:${c.source.startLine}`])).toEqual([
+      ['computes all', 'discovers', 'doc.txt:1'],
+    ]);
+  });
+
+  it('anchors a selection and traces it to its line', () => {
+    expect(doc.place({ kind: 'pdf', side: 'new', page: 1, quoted: 'It keeps a table.', body: 'x' })).toMatchObject({
+      quoted: 'It keeps a table.',
+      source: { path: 'doc.txt', startLine: 2, endLine: 2 },
+    });
   });
 });

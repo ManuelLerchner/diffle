@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatPrompt, parseSuggestions } from '@/server/comments/format.js';
-import type { CommentMessage, CommentThread } from '@/shared/protocol.js';
+import type { CommentMessage, CommentThread, FileAnchor, LineAnchor, PdfAnchor } from '@/shared/protocol.js';
 
 const msg = (body: string, over: Partial<CommentMessage> = {}): CommentMessage => ({
   id: 'm',
@@ -11,7 +11,7 @@ const msg = (body: string, over: Partial<CommentMessage> = {}): CommentMessage =
 });
 
 const t = (
-  over: Partial<Omit<CommentThread, 'anchor'>> & { anchor?: Partial<CommentThread['anchor']> },
+  over: Partial<Omit<CommentThread, 'anchor'>> & { anchor?: Partial<LineAnchor | FileAnchor> },
 ): CommentThread => ({
   id: 'x',
   messages: [msg('Rename this.')],
@@ -163,5 +163,28 @@ describe('a review exported as a prompt', () => {
       },
     ];
     await expect(formatPrompt(threads)).toMatchFileSnapshot('__snapshots__/prompt.md');
+  });
+
+  it('names the rendered page, and the source when one was traced', async () => {
+    const pdf = (over: Partial<PdfAnchor>): PdfAnchor => ({
+      kind: 'pdf',
+      path: 'thesis/main.typ',
+      side: 'new',
+      quoted: 'The solver discovers equations on demand.',
+      offset: 120,
+      page: 14,
+      rects: [],
+      section: '3.2 Local solving',
+      ...over,
+    });
+    const threads: CommentThread[] = [
+      t({ anchor: undefined, messages: [msg('Say which equations come first.')] }),
+      t({ messages: [msg('Clarify where this is used.')] }),
+      t({ messages: [msg('Good riddance.')], stale: true }),
+    ];
+    threads[0]!.anchor = pdf({ source: { path: 'thesis/ch/solver.typ', startLine: 182, endLine: 183 } });
+    threads[1]!.anchor = pdf({ offset: 300, page: 15, quoted: 'as Figure 3 shows', section: undefined });
+    threads[2]!.anchor = pdf({ side: 'old', quoted: 'computes all equations eagerly', page: 13, offset: 90 });
+    await expect(formatPrompt(threads)).toMatchFileSnapshot('__snapshots__/prompt-rendered.md');
   });
 });

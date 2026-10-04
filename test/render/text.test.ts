@@ -72,4 +72,8 @@ describe.skipIf(findOnPath('typst') == null)('extractText', () => {
     if (!compiled.ok) throw new Error(compiled.message);
     expect((await extractText(compiled.pdf)).words.map((w) => w.text)).toEqual(['1']);
   });
+
+  it('resolves the outline to the heading word', () => {
+    expect(text.headings).toEqual([{ title: 'Heading', word: 0 }]);
+  });
 });

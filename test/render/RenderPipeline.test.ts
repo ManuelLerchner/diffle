@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { formatPrompt } from '@/server/comments/format.js';
+import { UnquotableError } from '@/server/comments/CommentStore.js';
 import { GitRepo } from '@/server/git/GitRepo.js';
 import { findOnPath } from '@/server/lsp/which.js';
 import { RenderPipeline } from '@/server/render/RenderPipeline.js';
@@ -50,7 +52,13 @@ const write = async (path: string, text: string) => {
 };
 
 /** Each change as a reviewer reads it: what left, what came. */
-const summary = (d: RenderedDocument) => d.changes.map((c) => `- ${c.oldText}\n+ ${c.newText}`).join('\n\n');
+const summary = (d: RenderedDocument) =>
+  d.changes
+    .map((c) => {
+      const at = c.source ? ` (${c.source.side} ${c.source.path}:${c.source.startLine})` : '';
+      return `- ${c.oldText}\n+ ${c.newText}${at}`;
+    })
+    .join('\n\n');
 
 describe.skipIf(!hasTypst)('RenderPipeline with Typst', () => {
   beforeAll(async () => {
@@ -88,6 +96,46 @@ describe.skipIf(!hasTypst)('RenderPipeline with Typst', () => {
       }
   });
 
+  it('anchors a selection to its words and traces it to the source line', async () => {
+    const anchor = doc.place({
+      kind: 'pdf',
+      side: 'new',
+      page: 1,
+      // A selection may start inside a word; the anchor covers the whole word.
+      quoted: 'olver discovers equations on demand',
+      body: 'x',
+    });
+    expect(anchor.quoted).toBe('solver discovers equations on demand');
+    expect(anchor.source).toEqual({ path: 'thesis/ch/solver.typ', startLine: 2, endLine: 2 });
+    expect(anchor.section).toBe('Solver');
+  });
+
+  it('refuses a selection the render does not contain', () => {
+    expect(() => doc.place({ kind: 'pdf', side: 'new', page: 1, quoted: 'computes all equations', body: 'x' })).toThrow(
+      UnquotableError,
+    );
+  });
+
+  it('exports rendered threads with their source, and relocates them after an edit', async () => {
+    await session.comments.importThreads(
+      [
+        { kind: 'pdf', side: 'new', page: 1, quoted: 'keeps the equations it has met', body: 'Say which table.' },
+        { kind: 'pdf', side: 'old', page: 1, quoted: 'computes all equations eagerly', body: 'Good riddance.' },
+      ],
+      { ...session.anchorSource(), placePdf: (t) => doc.place(t) },
+    );
+    const before = session.comments.threads().map((t) => t.anchor);
+    await write('thesis/main.typ', main('This thesis studies local solvers. It adds a second sentence that reflows.'));
+    await session.refresh();
+    await doc.settled();
+    const after = session.comments.threads();
+    expect(after.every((t) => !t.stale)).toBe(true);
+    expect(after.map((t) => t.anchor.kind === 'pdf' && t.anchor.quoted)).toEqual(
+      before.map((a) => a.kind === 'pdf' && a.quoted),
+    );
+    await expect(formatPrompt(after)).toMatchFileSnapshot('__snapshots__/prompt.txt');
+  });
+
   it('reports a compile error on its side without failing the other', async () => {
     await write('thesis/ch/solver.typ', '= Solver\n#unknown-function()\n');
     await session.refresh();
@@ -95,5 +143,7 @@ describe.skipIf(!hasTypst)('RenderPipeline with Typst', () => {
     const d = doc.document();
     expect(d.old?.state).toBe('ready');
     expect(d.new).toMatchObject({ state: 'failed', message: expect.stringContaining('ch/solver.typ') });
+    // A failed side says nothing about the passages on it.
+    expect(session.comments.threads().every((t) => !t.stale)).toBe(true);
   });
 });

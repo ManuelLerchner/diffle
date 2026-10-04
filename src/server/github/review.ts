@@ -1,8 +1,10 @@
 import type {
   CommentMessage,
   CommentThread,
+  FileAnchor,
   GithubExportResponse,
   GithubPullRequest,
+  LineAnchor,
   Snapshot,
 } from '@/shared/protocol.js';
 import { compareThreads } from '@/server/comments/anchor.js';
@@ -54,14 +56,17 @@ export function buildReview(threads: CommentThread[], threadIds?: string[]): Bui
       skipped.push({ id: t.id, reason: 'stale' });
       continue;
     }
-    comments.push(toReviewComment(t));
+    if (t.anchor.kind === 'pdf') {
+      skipped.push({ id: t.id, reason: 'on the rendered document' });
+      continue;
+    }
+    comments.push(toReviewComment(t, t.anchor));
     ids.push(t.id);
   }
   return { comments, ids, skipped };
 }
 
-function toReviewComment(t: CommentThread): ReviewComment {
-  const { anchor } = t;
+function toReviewComment(t: CommentThread, anchor: LineAnchor | FileAnchor): ReviewComment {
   const body = formatBody(t.messages);
   if (anchor.kind === 'file') return { path: anchor.path, subjectType: 'FILE', body };
   const side = anchor.side === 'old' ? 'LEFT' : 'RIGHT';

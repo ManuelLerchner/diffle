@@ -9,6 +9,7 @@ import {
   type CommentThread,
   type LspSymbol,
   type ModeRequest,
+  type PdfAnchor,
   type Moved,
   type Side,
   type Snapshot,
@@ -223,9 +224,15 @@ export function visibleThreads(state: Pick<ReviewState, 'threads' | 'showResolve
   return state.showResolved ? state.threads : state.threads.filter((t) => !t.resolved);
 }
 
-/** The header label of a thread: its line range and side, or the whole file. */
+/** The header label of a thread: its line range and side, the whole file, or its page of the rendered document. */
 export function anchorLabel(a: CommentAnchor): string {
+  if (a.kind === 'pdf') return `rendered ${pdfLabel(a)}`;
   return a.kind === 'file' ? 'whole file' : rangeLabel(a);
+}
+
+/** A rendered passage's label: its side and page, as a line comment names its side and lines. */
+export function pdfLabel(a: Pick<PdfAnchor, 'side' | 'page'>): string {
+  return `${a.side === 'old' ? 'removed ' : ''}p.${a.page}`;
 }
 
 /** The header label of a line range, shared by saved comments and the draft so both name the same lines. */

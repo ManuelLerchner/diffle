@@ -119,6 +119,7 @@ const RENDERED_KEYMAP: Record<string, (r: RenderedState) => unknown> = {
   k: (r) => r.moveChange(-1),
   N: (r) => r.moveChange(-1),
   '[': (r) => r.moveChange(-1),
+  c: (r) => r.compose() || useStore.getState().flash('Select text on a page to comment on it'),
 };
 
 /** Real target, looking through shadow roots (the tree and diffs retarget events to their hosts). */
@@ -181,6 +182,11 @@ export function useKeymap(): void {
       )
         return;
       const rendered = useRendered.getState();
+      if (e.key === 'Escape' && rendered.selection) {
+        rendered.cancel();
+        clearPending();
+        return;
+      }
       if (e.key === 'Escape') {
         // Leaving a configuration pane returns to the entry list, not the diff.
         if (s.modePane && !s.helpOpen) {
