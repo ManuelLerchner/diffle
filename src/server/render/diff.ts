@@ -117,3 +117,28 @@ export function diffWords(
   }
   return out;
 }
+
+/**
+ * Where word `i` of `a` lands in `b`: shifted past every hunk before it, including words inserted
+ * right before it, or to its hunk's start when the hunk replaced or removed it.
+ */
+export function toNew(hunks: readonly Hunk[], i: number): number {
+  let shift = 0;
+  for (const h of hunks) {
+    if (h.a0 > i || (h.a0 === i && h.a1 > h.a0)) break;
+    if (h.a1 > i) return h.b0;
+    shift = h.b1 - h.a1;
+  }
+  return i + shift;
+}
+
+/** `toNew` the other way: where word `i` of `b` came from in `a`. */
+export function toOld(hunks: readonly Hunk[], i: number): number {
+  let shift = 0;
+  for (const h of hunks) {
+    if (h.b0 > i || (h.b0 === i && h.b1 > h.b0)) break;
+    if (h.b1 > i) return h.a0;
+    shift = h.a1 - h.b1;
+  }
+  return i + shift;
+}

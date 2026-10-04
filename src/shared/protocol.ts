@@ -480,6 +480,8 @@ export const PdfThreadCreateSchema = z.object({
   page: z.number().int().positive(),
   quoted: z.string().refine((q) => q.trim().length > 0, 'quoted required'),
   body: z.string().refine((body) => body.trim().length > 0, 'body required'),
+  /** The selection was made on the combined render (`side` is then 'new'); its removed words are skipped. */
+  combined: z.literal(true).optional(),
 });
 export type PdfThreadCreate = z.infer<typeof PdfThreadCreateSchema>;
 
@@ -850,6 +852,15 @@ export const RenderedChangeSchema = z.object({
   newText: z.string(),
   /** The source line the change traces to, when it traces to one place: the new side's, else the old side's. */
   source: SourceRangeSchema.extend({ side: SideSchema }).optional(),
+  /** In the combined render: the added words, which it tints. Its removed words are typeset struck through. */
+  combined: PdfRectSchema.array().optional(),
+  /** In the combined render: where the change starts, removed words included, for jumping to it. */
+  combinedAt: PdfRectSchema.optional(),
+  /**
+   * The removed words are typeset in the combined render. False when its file's insertions were refused,
+   * so the reader must be told of them another way.
+   */
+  inlined: z.boolean().optional(),
 });
 export type RenderedChange = z.infer<typeof RenderedChangeSchema>;
 
@@ -865,10 +876,21 @@ export const RenderedDocumentSchema = z.object({
   new: RenderedSideSchema.nullable(),
   /** In reading order of the new side. Empty unless both sides are ready. */
   changes: RenderedChangeSchema.array(),
+  /**
+   * The new side with the old side's removed words typeset in place, struck through, as latexdiff does:
+   * null without changes, failed when the compiler refused even the files it could keep.
+   */
+  combined: RenderedSideSchema.nullable(),
+  /** Where each new-side rendered thread's passage sits in the combined render, by thread id. */
+  combinedThreads: z.record(z.string(), PdfRectSchema.array()),
 });
 export type RenderedDocument = z.infer<typeof RenderedDocumentSchema>;
 
-export const DocumentPdfQuerySchema = z.object({ rev: SideSchema, key: z.string().min(1) });
+/** A rendered surface: one side, or the new side with the removed words inlined. */
+export const SurfaceSchema = z.enum(['old', 'new', 'combined']);
+export type Surface = z.infer<typeof SurfaceSchema>;
+
+export const DocumentPdfQuerySchema = z.object({ rev: SurfaceSchema, key: z.string().min(1) });
 
 /** Derived per changed file: 'restale' means viewed at an older blob. */
 export const ViewedStateSchema = z.enum(['unviewed', 'viewed', 'restale']);

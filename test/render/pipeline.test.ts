@@ -49,6 +49,8 @@ describe('RenderPipeline with any renderer', () => {
   it('compiles both sides and reports the changed words, traced to their source line', () => {
     const d = doc.document();
     expect([d.old?.state, d.new?.state]).toEqual(['ready', 'ready']);
+    // No `inline`: the renderer cannot typeset removals, so there is no combined render.
+    expect(d.combined).toBeNull();
     expect(d.changes.map((c) => [c.oldText, c.newText, c.source && `${c.source.path}:${c.source.startLine}`])).toEqual([
       ['computes all', 'discovers', 'doc.txt:1'],
     ]);

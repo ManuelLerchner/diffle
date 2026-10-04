@@ -1,4 +1,5 @@
 import type { Compiled, Renderer, SourceToken } from '@/server/render/Renderer.js';
+import { combineSource } from './combine.js';
 import { compileTypst, typstVersion } from './compile.js';
 import { typstProse } from './prose.js';
 
@@ -19,5 +20,9 @@ export class TypstRenderer implements Renderer {
 
   proseTokens(path: string, contents: string): SourceToken[] | null {
     return path.endsWith('.typ') ? typstProse(contents) : null;
+  }
+
+  inline(path: string, oldSource: string, newSource: string): string | null {
+    return path.endsWith('.typ') ? combineSource(oldSource, newSource) : null;
   }
 }

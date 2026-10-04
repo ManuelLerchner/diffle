@@ -15,6 +15,8 @@ export type Compiled =
       ok: false;
       /** The compiler's diagnostics, for the reader. */
       message: string;
+      /** The file the first error is in, relative to its root. */
+      file?: string;
     };
 
 /**
@@ -31,4 +33,9 @@ export interface Renderer {
    * comments and references left out. Null for a file that is not a source of this format.
    */
   proseTokens(path: string, contents: string): SourceToken[] | null;
+  /**
+   * The new source of one file with the old one's removed words put back in place, marked as removed,
+   * for a render that shows removals inline. Absent when the format cannot; null for a file it leaves alone.
+   */
+  inline?(path: string, oldSource: string, newSource: string): string | null;
 }

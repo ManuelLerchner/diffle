@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { isAbsolute, join, posix, relative, resolve as resolvePath, sep } from 'node:path';
 import type { Compiled } from '@/server/render/Renderer.js';
 
 /** Diagnostics kept from a failed compile: enough for every error of a broken edit. */
@@ -38,7 +38,7 @@ export function compileTypst(root: string, entry: string, command = 'typst'): Pr
       clearTimeout(timer);
       if (code !== 0) {
         const why = signal ? `typst was stopped (${signal})` : `typst exited with ${code}`;
-        resolve({ ok: false, message: relativize(stderr.trim(), root) || why });
+        resolve(failure(relativize(stderr.trim(), root) || why));
         return;
       }
       void Promise.all([readFile(out), readFile(deps, 'utf8').catch(() => '{}')]).then(
@@ -47,6 +47,14 @@ export function compileTypst(root: string, entry: string, command = 'typst'): Pr
       );
     });
   });
+}
+
+/** A failed compile, with the erring file read off Typst's short diagnostics. */
+function failure(message: string): Compiled {
+  const out: Compiled = { ok: false, message };
+  const file = /^(?:\.\/)?([^:\n]+\.typ):\d+:\d+: error/m.exec(message)?.[1];
+  if (file) out.file = posix.normalize(file.split(sep).join('/'));
+  return out;
 }
 
 /** Diagnostics name the temporary copy; the reader knows the files by their place in the project. */

@@ -9,6 +9,8 @@ export interface PdfSelection {
   /** 1-based page the selection starts on. */
   page: number;
   quoted: string;
+  /** Made on the combined render, whose removed words the server skips. */
+  combined: boolean;
   /** Viewport point under the selection's end, where the comment button and composer appear. */
   at: { x: number; y: number };
 }
@@ -17,7 +19,17 @@ export interface PdfSelection {
 export interface RenderedJump {
   old?: PdfRect;
   new?: PdfRect;
+  combined?: PdfRect;
   nonce: number;
+}
+
+const INLINE_KEY = 'diffle:renderedInline';
+function readInline(): boolean {
+  try {
+    return localStorage.getItem(INLINE_KEY) !== '0';
+  } catch {
+    return true;
+  }
 }
 
 /** What the center pane shows: the source diff, the rendered document, or both side by side. */
@@ -27,6 +39,9 @@ export interface RenderedState {
   /** The `--typst` document; null when the review renders none. */
   doc: RenderedDocument | null;
   view: RenderedView;
+  /** Show the combined render, removed words typeset in place, when there is one. */
+  inline: boolean;
+  setInline(inline: boolean): void;
   /** Index into `doc.changes` of the change last jumped to; -1 before the first jump. */
   change: number;
   jump: RenderedJump | null;
@@ -51,6 +66,7 @@ let seq = 0;
 export const useRendered = create<RenderedState>((set, get) => ({
   doc: null,
   view: 'source',
+  inline: readInline(),
   change: -1,
   jump: null,
   selection: null,
@@ -75,13 +91,22 @@ export const useRendered = create<RenderedState>((set, get) => ({
     set({ view, selection: null, composing: false });
   },
 
+  setInline(inline) {
+    try {
+      localStorage.setItem(INLINE_KEY, inline ? '1' : '0');
+    } catch {
+      /* the choice lasts for this page only */
+    }
+    set({ inline, selection: null, composing: false });
+  },
+
   moveChange(delta) {
     const { doc, change } = get();
     const n = doc?.changes.length ?? 0;
     if (n === 0) return useStore.getState().flash('No rendered changes');
     const next = change < 0 ? (delta > 0 ? 0 : n - 1) : (change + delta + n) % n;
     const c = doc!.changes[next]!;
-    set({ change: next, jump: { old: c.old[0], new: c.new[0], nonce: ++nonce } });
+    set({ change: next, jump: { old: c.old[0], new: c.new[0], combined: c.combinedAt, nonce: ++nonce } });
     // Beside the source diff, the diff follows to the lines the change came from.
     if (get().view === 'both' && c.source)
       void useStore.getState().openFile(c.source.path, c.source.startLine, c.source.side);
@@ -112,6 +137,7 @@ export const useRendered = create<RenderedState>((set, get) => ({
         page: sel.page,
         quoted: sel.quoted,
         body,
+        ...(sel.combined ? { combined: true as const } : {}),
       });
     } catch (e) {
       useStore.getState().report('Commenting', e);
@@ -128,7 +154,7 @@ export const useRendered = create<RenderedState>((set, get) => ({
     if (!doc || anchor.kind !== 'pdf') return;
     set({
       view: view === 'source' ? 'rendered' : view,
-      jump: { [anchor.side]: anchor.rects[0], nonce: ++nonce },
+      jump: { [anchor.side]: anchor.rects[0], combined: doc.combinedThreads[thread.id]?.[0], nonce: ++nonce },
     });
   },
 }));

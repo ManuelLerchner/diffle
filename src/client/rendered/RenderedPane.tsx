@@ -1,10 +1,20 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { ChevronDown, ChevronUp, FileText, LoaderCircle, MessageSquare, MessageSquarePlus, X } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  LoaderCircle,
+  MessageSquare,
+  MessageSquarePlus,
+  Strikethrough,
+  X,
+} from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CommentThread, PdfRect, RenderedDocument, Side } from '@/shared/protocol.js';
+import type { CommentThread, PdfRect, RenderedDocument, Side, Surface } from '@/shared/protocol.js';
 import { pdfLabel, visibleThreads } from '@/client/model.js';
 import { useStore } from '@/client/store.js';
 import { Button } from '@/client/ui/Button.js';
+import { SegmentedControl, ToggleButton } from '@/client/ui/ToggleButton.js';
 import { loadPdf, PdfPage } from './PdfPage.js';
 import { useRendered } from './state.js';
 
@@ -16,37 +26,42 @@ const GAP = 16;
 const MAX_PAGE_WIDTH = 900;
 
 /**
- * The `--typst` document as the new side renders it, with the words an edit brought tinted green and the
- * words it took away marked in the margin: one column, read like the document itself. When the new side
- * does not compile, the old one stands in under the compiler's message. It covers the diff, or sits
- * beside it; the diff stays mounted either way and keeps its place.
+ * The `--typst` document as the new side renders it, with the words an edit brought tinted green: one
+ * column, read like the document itself. Removed words are typeset in place, struck through, when the
+ * combined render exists and inline removals are on; otherwise they are marked in the margin. When the
+ * new side does not compile, the old one stands in under the compiler's message. It covers the diff, or
+ * sits beside it; the diff stays mounted either way and keeps its place.
  */
 export function RenderedPane() {
   const doc = useRendered((s) => s.doc);
   const view = useRendered((s) => s.view);
+  const inline = useRendered((s) => s.inline);
   if (!doc || view === 'source') return null;
-  const shown: Side = doc.new?.state === 'ready' || doc.old?.state !== 'ready' ? 'new' : 'old';
+  const side: Side = doc.new?.state === 'ready' || doc.old?.state !== 'ready' ? 'new' : 'old';
+  const shown: Surface = side === 'new' && inline && doc.combined?.state === 'ready' ? 'combined' : side;
   return (
     <section
       className={`flex min-h-0 flex-col bg-canvas ${view === 'rendered' ? 'absolute inset-0 z-10' : 'border-l border-l-border'}`}
       aria-label={`Rendered ${doc.entry}`}
       data-rendered
     >
-      <Toolbar doc={doc} side={shown} />
+      <Toolbar doc={doc} surface={shown} />
       {shown === 'old' && doc.new?.state === 'failed' && (
         <div className="border-b border-b-border bg-surface px-3 py-1.5 text-[0.75rem]">
           <span className="font-semibold text-danger">The new side does not compile; showing the old one.</span>
           <pre className="m-0 mt-1 max-h-24 overflow-auto font-mono whitespace-pre-wrap">{doc.new.message}</pre>
         </div>
       )}
-      <Column doc={doc} side={shown} />
+      <Column doc={doc} surface={shown} />
       <SelectionActions />
     </section>
   );
 }
 
-function Toolbar({ doc, side }: { doc: RenderedDocument; side: Side }) {
-  const rendered = doc[side];
+function Toolbar({ doc, surface }: { doc: RenderedDocument; surface: Surface }) {
+  const rendered = doc[surface];
+  const inline = useRendered((s) => s.inline);
+  const setInline = useRendered((s) => s.setInline);
   const change = useRendered((s) => s.change);
   const moveChange = useRendered((s) => s.moveChange);
   const setView = useRendered((s) => s.setView);
@@ -66,6 +81,22 @@ function Toolbar({ doc, side }: { doc: RenderedDocument; side: Side }) {
         </span>
       )}
       <span className="flex-1" />
+      {doc.combined && (
+        <SegmentedControl>
+          <ToggleButton
+            selected={inline && doc.combined.state === 'ready'}
+            disabled={doc.combined.state !== 'ready'}
+            onClick={() => setInline(!inline)}
+            title={
+              doc.combined.state === 'failed'
+                ? `Typst refused the removed words in place: ${doc.combined.message}`
+                : 'Typeset removed words in place, struck through; off marks them in the margin'
+            }
+          >
+            <Strikethrough size="0.875rem" /> Inline removals
+          </ToggleButton>
+        </SegmentedControl>
+      )}
       <span className="text-muted">
         {n === 0 ? 'no text changes' : `${change < 0 ? '–' : change + 1} / ${n} change${n === 1 ? '' : 's'}`}
       </span>
@@ -92,12 +123,14 @@ interface Placed {
   /** Index into the document's changes, or the thread the rect belongs to. */
   change?: number;
   thread?: CommentThread;
-  /** Words that left at this change, marked in the margin beside this rect. */
+  /** Words that left and are not typeset here, marked in the margin beside this rect. */
   removed?: string;
 }
 
-function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
-  const rendered = doc[side];
+function Column({ doc, surface }: { doc: RenderedDocument; surface: Surface }) {
+  const rendered = doc[surface];
+  // The combined render shows the new side's words, plus removed ones that anchor nowhere.
+  const side: Side = surface === 'combined' ? 'new' : surface;
   const scroller = useRef<HTMLDivElement>(null);
   const [root, setRoot] = useState<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
@@ -116,14 +149,14 @@ function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
   useEffect(() => {
     if (!key) return setPdf(null);
     let live = true;
-    loadPdf(side, key).then(
+    loadPdf(surface, key).then(
       (d) => live && setPdf(d),
       (e: unknown) => live && useStore.getState().report('Loading the PDF', e),
     );
     return () => {
       live = false;
     };
-  }, [side, key]);
+  }, [surface, key]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -146,25 +179,35 @@ function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
       list.push(p);
       out.set(p.rect.page, list);
     };
-    doc.changes.forEach((c, i) =>
-      c[side].forEach((rect, j) =>
-        add({ rect, change: i, ...(side === 'new' && j === 0 && c.oldText ? { removed: c.oldText } : {}) }),
-      ),
-    );
-    for (const t of threads)
-      if (t.anchor.kind === 'pdf' && t.anchor.side === side && !t.stale)
-        t.anchor.rects.forEach((rect) => add({ rect, thread: t }));
+    doc.changes.forEach((c, i) => {
+      // Removed words are typeset in the combined render; elsewhere the new side marks them in the margin.
+      if (surface === 'combined') {
+        // Removed words Typst refused in place still need telling: the margin tab, as on the new side.
+        const lost = c.oldText && c.inlined === false;
+        const at = c.combined?.[0] ?? c.combinedAt;
+        if (lost && at) add({ rect: { ...at, w: 0 }, removed: c.oldText });
+        return (c.combined ?? []).forEach((rect) => add({ rect, change: i }));
+      }
+      c[surface].forEach((rect, j) =>
+        add({ rect, change: i, ...(surface === 'new' && j === 0 && c.oldText ? { removed: c.oldText } : {}) }),
+      );
+    });
+    for (const t of threads) {
+      if (t.anchor.kind !== 'pdf' || t.anchor.side !== side || t.stale) continue;
+      const rects = surface === 'combined' ? (doc.combinedThreads[t.id] ?? []) : t.anchor.rects;
+      rects.forEach((rect) => add({ rect, thread: t }));
+    }
     return out;
-  }, [doc.changes, threads, side]);
+  }, [doc.changes, doc.combinedThreads, threads, surface, side]);
 
   // A jump lands its rect at the gaze point; positions come from the layout, not from measuring the DOM.
   useLayoutEffect(() => {
-    const rect = jump?.[side];
+    const rect = jump?.[surface];
     const el = scroller.current;
     const box = rect && layout[rect.page - 1];
     if (!el || !box) return;
     el.scrollTo({ top: box.top + rect.y * box.height - el.clientHeight * EYE_FRACTION });
-  }, [jump, side, layout]);
+  }, [jump, surface, layout]);
 
   const onMouseUp = () => {
     const sel = window.getSelection();
@@ -178,7 +221,13 @@ function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
     if (!quoted.trim() || !pageEl) return;
     const end = range.getClientRects();
     const last = end[end.length - 1] ?? range.getBoundingClientRect();
-    select({ side, page: Number(pageEl.dataset.page), quoted, at: { x: last.right, y: last.bottom } });
+    select({
+      side,
+      page: Number(pageEl.dataset.page),
+      quoted,
+      combined: surface === 'combined',
+      at: { x: last.right, y: last.bottom },
+    });
   };
 
   return (
@@ -203,7 +252,7 @@ function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
             </pre>
           </div>
         ) : (
-          <div style={{ paddingBlock: GAP }} className="flex flex-col" data-side={side}>
+          <div style={{ paddingBlock: GAP }} className="flex flex-col" data-side={side} data-surface={surface}>
             {layout.map((box, i) => (
               <div key={i} style={{ marginBottom: i === layout.length - 1 ? 0 : GAP }}>
                 <PdfPage doc={pdf} page={i + 1} width={box.width} height={box.height} scale={box.scale} root={root}>

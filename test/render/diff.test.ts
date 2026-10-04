@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { diffKeys, diffWords, type Hunk } from '@/server/render/diff.js';
+import { diffKeys, diffWords, type Hunk, toNew, toOld } from '@/server/render/diff.js';
 
 /** `a` with every hunk replaced by its `b` span: must equal `b` for any correct diff. */
 function apply(a: string[], b: string[], hunks: Hunk[]): string[] {
@@ -56,5 +56,24 @@ describe('diffWords', () => {
     const b = 'one two THREE four five six'.split(' ');
     // Line breaks moved within the edited paragraph; the words themselves did not.
     expect(diffWords(a, b, [0, 2, 4], [0, 3, 4])).toEqual([{ a0: 2, a1: 3, b0: 2, b1: 3 }]);
+  });
+});
+
+describe('toNew / toOld', () => {
+  // "every calling context" -> "every [calling] fff context": a removed word inlined before its replacement.
+  const a = 'every fff context'.split(' ');
+  const b = 'every calling fff context'.split(' ');
+  const hunks = diffKeys(a, b);
+
+  it('maps a word past words inserted right before it', () => {
+    expect(toNew(hunks, 1)).toBe(2);
+    expect(toNew(hunks, 2)).toBe(3);
+    expect(toOld(hunks, 2)).toBe(1);
+  });
+
+  it('maps a replaced word to its replacement', () => {
+    const r = diffKeys('a old b'.split(' '), 'a new b'.split(' '));
+    expect(toNew(r, 1)).toBe(1);
+    expect(toNew(r, 2)).toBe(2);
   });
 });

@@ -12,11 +12,12 @@ import type {
   ServerMessage,
   Side,
   Snapshot,
+  Surface,
 } from '@/shared/protocol.js';
 import { UnquotableError } from '@/server/comments/CommentStore.js';
 import { mapLimit } from '@/server/concurrency.js';
 import type { Session } from '@/server/Session.js';
-import { diffWords } from './diff.js';
+import { diffWords, type Hunk, toNew, toOld } from './diff.js';
 import { findPassage, firstWordOn, sectionOf, selectionKeys, sourceOf, type Span, spanRects } from './passage.js';
 import { extractText, type PdfText } from './text.js';
 import type { Renderer, SourceToken } from './Renderer.js';
@@ -24,7 +25,8 @@ import type { Renderer, SourceToken } from './Renderer.js';
 /** One side, compiled and read, or why it could not be. */
 type Outcome =
   | { state: 'ready'; key: string; pdf: Buffer; text: PdfText; sources: Map<string, SourceToken[]> }
-  | { state: 'failed'; message: string }
+  /** `file`: the source the first error is in, when the renderer could tell. */
+  | { state: 'failed'; message: string; file?: string }
   | { state: 'absent' };
 
 type Ready = Extract<Outcome, { state: 'ready' }>;
@@ -33,7 +35,19 @@ interface Rendered {
   snap: Snapshot;
   old: Outcome;
   new: Outcome;
+  /** Word hunks from the old side's words to the new side's; empty unless both are ready. */
+  hunks: Hunk[];
   changes: RenderedChange[];
+  /** The new side with the old side's removed words typeset in place; null without changes. */
+  combined: Outcome | null;
+  /** Word hunks from the new side's words to the combined one's: the removed words it adds. */
+  inlined: Hunk[];
+}
+
+/** One side's files, keyed relative to the entry's directory, and their render. */
+interface SideRender {
+  files: Map<string, Buffer> | null;
+  outcome: Outcome;
 }
 
 interface Broadcaster {
@@ -42,8 +56,8 @@ interface Broadcaster {
 
 /** Concurrent reads while copying one side's tree. */
 const READ_CONCURRENCY = 8;
-/** Renders kept by content: the two sides of the current snapshot and of the one before. */
-const CACHE_SIZE = 4;
+/** Renders kept by content: the two sides and the combined render, of the current snapshot and the one before. */
+const CACHE_SIZE = 6;
 
 /**
  * A review's document, compiled by its `Renderer` on both sides of every snapshot. Each side is copied
@@ -85,12 +99,29 @@ export class RenderPipeline {
       old: c ? wire(c.old) : null,
       new: c ? wire(c.new) : null,
       changes: c?.changes ?? [],
+      combined: c?.combined ? wire(c.combined) : null,
+      combinedThreads: c ? this.combinedThreads(c) : {},
     };
   }
 
-  /** The PDF a side's key names, while that side is current. */
-  pdf(side: Side, key: string): Buffer | null {
-    const o = this.current?.[side];
+  /** New-side passages carried through the removed words the combined render adds. */
+  private combinedThreads(c: Rendered): Record<string, PdfRect[]> {
+    if (c.combined?.state !== 'ready') return {};
+    const out: Record<string, PdfRect[]> = {};
+    for (const t of this.session.comments.threads()) {
+      const a = t.anchor;
+      if (a.kind !== 'pdf' || a.side !== 'new' || t.stale) continue;
+      const n = selectionKeys(a.quoted).length;
+      if (n === 0) continue;
+      const start = toNew(c.inlined, a.offset);
+      out[t.id] = spanRects(c.combined.text.words, { start, end: toNew(c.inlined, a.offset + n - 1) + 1 });
+    }
+    return out;
+  }
+
+  /** The PDF a surface's key names, while that surface is current. */
+  pdf(surface: Surface, key: string): Buffer | null {
+    const o = this.current?.[surface];
     return o?.state === 'ready' && o.key === key ? o.pdf : null;
   }
 
@@ -106,9 +137,26 @@ export class RenderPipeline {
   place(t: PdfThreadCreate): PdfAnchor {
     const o = this.current?.[t.side];
     if (o?.state !== 'ready') throw new UnquotableError(`the ${t.side} side of ${this.entry} is not rendered`);
+    if (t.combined) return this.placeCombined(t, o);
     const span = findPassage(o.text.words, selectionKeys(t.quoted), firstWordOn(o.text.words, t.page));
     if (!span) throw new UnquotableError(`the ${t.side} render of ${this.entry} does not contain the selection`);
     return this.anchorAt(o, t.side, span);
+  }
+
+  /** A selection on the combined render, anchored on the new-side words it covers. */
+  private placeCombined(t: PdfThreadCreate, now: Ready): PdfAnchor {
+    const c = this.current!;
+    if (t.side !== 'new' || c.combined?.state !== 'ready')
+      throw new UnquotableError(`the combined render of ${this.entry} is not current`);
+    const words = c.combined.text.words;
+    const span = findPassage(words, selectionKeys(t.quoted), firstWordOn(words, t.page));
+    if (!span) throw new UnquotableError(`the combined render of ${this.entry} does not contain the selection`);
+    const start = toOld(c.inlined, span.start);
+    const end = toOld(c.inlined, span.end - 1) + 1;
+    // Only removed words: they have no place on the new side to anchor to.
+    if (end <= start || selectionKeys(t.quoted).length === 0)
+      throw new UnquotableError('select words of the new version; removed words have nowhere to anchor');
+    return this.anchorAt(now, 'new', { start, end });
   }
 
   /**
@@ -172,23 +220,60 @@ export class RenderPipeline {
   }
 
   private async render(snap: Snapshot): Promise<void> {
-    const [old, next] = await Promise.all([this.side(snap, 'old'), this.side(snap, 'new')]);
+    const [a, b] = await Promise.all([this.side(snap, 'old'), this.side(snap, 'new')]);
+    const old = a.outcome;
+    const next = b.outcome;
     // A render of a comparison the session has left is no use to anyone.
     if (this.latest?.mode !== snap.mode) return;
     const prev = this.current;
-    const same = prev?.old === old && prev.new === next;
-    const changes =
-      old.state === 'ready' && next.state === 'ready' ? (same ? prev.changes : changesBetween(old, next)) : [];
-    this.current = { snap, old, new: next, changes };
+    if (prev?.old === old && prev.new === next) {
+      this.current = { ...prev, snap };
+    } else if (old.state === 'ready' && next.state === 'ready') {
+      const { hunks, changes } = changesBetween(old, next);
+      const combined = hunks.length && a.files && b.files ? await this.combine(a.files, b.files) : null;
+      const inlined = combined?.state === 'ready' ? alignWords(next.text, combined.text) : [];
+      if (combined?.state === 'ready') placeInline(changes, hunks, inlined, combined.text);
+      this.current = { snap, old, new: next, hunks, changes, combined, inlined };
+    } else {
+      this.current = { snap, old, new: next, hunks: [], changes: [], combined: null, inlined: [] };
+    }
     if (await this.session.comments.relocatePdf((anchor) => this.relocate(anchor)))
       this.hub.broadcast({ type: 'threads' });
     this.hub.broadcast({ type: 'document' });
   }
 
   /** One side's render, from the cache when its files are the ones last compiled. */
-  private async side(snap: Snapshot, side: Side): Promise<Outcome> {
+  private async side(snap: Snapshot, side: Side): Promise<SideRender> {
     const files = await this.files(snap, side);
-    return files ? this.cached(files) : { state: 'absent' };
+    return { files, outcome: files ? await this.cached(files) : { state: 'absent' } };
+  }
+
+  /**
+   * The new side with the old side's removed words put back into each changed source file and
+   * compiled, when the renderer can. A file whose insertions the compiler refuses (they landed in code
+   * or math) goes back to its new text and the rest compile again; refused even so, there is no
+   * combined render.
+   */
+  private async combine(oldFiles: Map<string, Buffer>, newFiles: Map<string, Buffer>): Promise<Outcome | null> {
+    if (!this.renderer.inline) return null;
+    const files = new Map(newFiles);
+    const touched = new Set<string>();
+    for (const [rel, buf] of newFiles) {
+      const was = oldFiles.get(rel);
+      if (!was || was.equals(buf)) continue;
+      const combined = this.renderer.inline(rel, was.toString('utf8'), buf.toString('utf8'));
+      if (combined == null || combined === buf.toString('utf8')) continue;
+      files.set(rel, Buffer.from(combined, 'utf8'));
+      touched.add(rel);
+    }
+    // Only additions: the new render already shows everything.
+    if (touched.size === 0) return null;
+    for (;;) {
+      const outcome = await this.cached(files);
+      if (outcome.state !== 'failed' || !outcome.file || !touched.has(outcome.file)) return outcome;
+      touched.delete(outcome.file);
+      files.set(outcome.file, newFiles.get(outcome.file)!);
+    }
   }
 
   /** The render of exactly these files, compiled once per content. */
@@ -248,7 +333,8 @@ export class RenderPipeline {
         await writeFile(abs, buf);
       }
       const compiled = await this.renderer.compile(root, posix.basename(this.entry));
-      if (!compiled.ok) return { state: 'failed', message: compiled.message };
+      if (!compiled.ok)
+        return { state: 'failed', message: compiled.message, ...(compiled.file ? { file: compiled.file } : {}) };
       const text = await extractText(compiled.pdf).catch((e: Error) => e);
       if (text instanceof Error) return { state: 'failed', message: `cannot read the compiled PDF: ${text.message}` };
       // Only the files the document read, when the compiler said; else every file it could have.
@@ -269,7 +355,7 @@ export class RenderPipeline {
 
 function wire(o: Outcome): RenderedSide {
   if (o.state === 'ready') return { state: 'ready', key: o.key, pages: o.text.pages };
-  return o;
+  return o.state === 'failed' ? { state: 'failed', message: o.message } : o;
 }
 
 /** Visual lines of a word list: the index of each line's first word. */
@@ -293,6 +379,31 @@ function rectsOrCaret(t: PdfText, start: number, end: number): PdfRect[] {
   return after ? [{ ...after, w: 0 }] : [];
 }
 
+/** Hunks between two renders of mostly the same words, aligned line by line as the change diff is. */
+function alignWords(a: PdfText, b: PdfText): Hunk[] {
+  return diffWords(
+    a.words.map((w) => w.key),
+    b.words.map((w) => w.key),
+    lineStarts(a),
+    lineStarts(b),
+  );
+}
+
+/** Each change's place in the combined render, found through the new side's words: `inlined` maps them over. */
+function placeInline(changes: RenderedChange[], hunks: readonly Hunk[], inlined: readonly Hunk[], t: PdfText): void {
+  hunks.forEach((h, i) => {
+    const added = toNew(inlined, h.b0);
+    const end = h.b1 > h.b0 ? toNew(inlined, h.b1 - 1) + 1 : added;
+    // The removed words sit just before the added ones, after the last unchanged word.
+    const start = Math.min(added, h.b0 > 0 ? toNew(inlined, h.b0 - 1) + 1 : 0);
+    const change = changes[i]!;
+    change.combined = end > added ? spanRects(t.words, { start: added, end }) : [];
+    if (h.a1 > h.a0) change.inlined = added > start;
+    const at = rectsOrCaret(t, start, Math.max(start + 1, end))[0];
+    if (at) change.combinedAt = at;
+  });
+}
+
 /**
  * Words of context tried around a change, widest first, so a one-word edit still traces to its source
  * line; narrower windows and one-sided ones keep a change near a heading or a file boundary traceable.
@@ -307,7 +418,7 @@ const TRACE_WINDOWS: ReadonlyArray<readonly [number, number]> = [
   [0, 0],
 ];
 
-function changesBetween(a: Ready, b: Ready): RenderedChange[] {
+function changesBetween(a: Ready, b: Ready): { hunks: Hunk[]; changes: RenderedChange[] } {
   const hunks = diffWords(
     a.text.words.map((w) => w.key),
     b.text.words.map((w) => w.key),
@@ -326,7 +437,7 @@ function changesBetween(a: Ready, b: Ready): RenderedChange[] {
     }
     return null;
   };
-  return hunks.map((h): RenderedChange => {
+  const changes = hunks.map((h): RenderedChange => {
     const change: RenderedChange = {
       old: rectsOrCaret(a.text, h.a0, h.a1),
       new: rectsOrCaret(b.text, h.b0, h.b1),
@@ -339,4 +450,5 @@ function changesBetween(a: Ready, b: Ready): RenderedChange[] {
     else if (fromOld) change.source = { ...fromOld, side: 'old' };
     return change;
   });
+  return { hunks, changes };
 }
