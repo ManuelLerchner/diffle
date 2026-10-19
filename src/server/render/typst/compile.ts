@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join, posix, relative, resolve as resolvePath, sep } from 'node:path';
+import { delimiter, isAbsolute, join, posix, relative, resolve as resolvePath, sep } from 'node:path';
 import type { Compiled } from '@/server/render/Renderer.js';
 
 /** Diagnostics kept from a failed compile: enough for every error of a broken edit. */
@@ -16,10 +16,7 @@ const TIMEOUT_MS = 5 * 60_000;
 export function compileTypst(root: string, entry: string, command = 'typst'): Promise<Compiled> {
   const out = join(root, '.diffle-out.pdf');
   const deps = join(root, '.diffle-deps.json');
-  // `sys.inputs.diffle` lets a document tell a review render from its own builds, e.g. to stand in for
-  // generated data no revision contains.
-  const args = ['compile', '--root', root, '--input', 'diffle=1', '--deps', deps, '--deps-format', 'json'];
-  args.push('--diagnostic-format', 'short', join(root, entry), out);
+  const args = typstArgs(root, entry);
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
@@ -76,9 +73,29 @@ function depInputs(json: string, root: string): string[] {
   }
 }
 
-/** The compiler's version line, which keys cached renders: another compiler may lay out differently. */
+/** The compile command line for `entry` under `root`. */
+function typstArgs(root: string, entry: string): string[] {
+  // `sys.inputs.diffle` lets a document tell a review render from its own builds, e.g. to stand in for
+  // generated data no revision contains.
+  const args = ['compile', '--root', root, '--input', 'diffle=1'];
+  args.push('--deps', join(root, '.diffle-deps.json'), '--deps-format', 'json');
+  // Fonts the project ships come with the tree. A `--font-path` replaces `TYPST_FONT_PATHS`, so keep its
+  // directories too.
+  for (const dir of [root, ...(process.env.TYPST_FONT_PATHS ?? '').split(delimiter).filter(Boolean)])
+    args.push('--font-path', dir);
+  args.push('--diagnostic-format', 'short', join(root, entry), join(root, '.diffle-out.pdf'));
+  return args;
+}
+
+/**
+ * The compiler's version line and command line, which key cached renders: another compiler or other
+ * flags may lay out differently.
+ */
 export function typstVersion(command = 'typst'): Promise<string> {
+  const invocation = typstArgs('<root>', '<entry>').join(' ');
   return new Promise((resolve) => {
-    execFile(command, ['--version'], { timeout: 10_000 }, (err, stdout) => resolve(err ? '' : stdout.trim()));
+    execFile(command, ['--version'], { timeout: 10_000 }, (err, stdout) =>
+      resolve(err ? '' : `${stdout.trim()}\n${invocation}`),
+    );
   });
 }

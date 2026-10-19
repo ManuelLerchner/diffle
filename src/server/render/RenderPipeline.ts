@@ -251,8 +251,8 @@ export class RenderPipeline {
   /**
    * The new side with the old side's removed words put back into each changed source file and
    * compiled, when the renderer can. A file whose insertions the compiler refuses (they landed in code
-   * or math) goes back to its new text and the rest compile again; refused even so, there is no
-   * combined render.
+   * or math, or broke markup another file relies on) goes back to its new text and the rest compile
+   * again; with every file refused, the last failure stands for the combined render.
    */
   private async combine(oldFiles: Map<string, Buffer>, newFiles: Map<string, Buffer>): Promise<Outcome | null> {
     if (!this.renderer.inline) return null;
@@ -268,12 +268,26 @@ export class RenderPipeline {
     }
     // Only additions: the new render already shows everything.
     if (touched.size === 0) return null;
-    for (;;) {
-      const outcome = await this.cached(files);
-      if (outcome.state !== 'failed' || !outcome.file || !touched.has(outcome.file)) return outcome;
-      touched.delete(outcome.file);
-      files.set(outcome.file, newFiles.get(outcome.file)!);
-    }
+    // The new side compiles, so a failure lies in the group just added. An error located elsewhere (a
+    // template tripping over a heading the insertions unmade) names no file: halve the group to find it.
+    const accepted = new Map(newFiles);
+    let last: Outcome | null = null;
+    const add = async (group: string[]): Promise<void> => {
+      if (group.length === 0) return;
+      const trial = new Map(accepted);
+      for (const rel of group) trial.set(rel, files.get(rel)!);
+      const outcome = await this.cached(trial);
+      if (outcome.state !== 'failed' || last?.state !== 'ready') last = outcome;
+      if (outcome.state === 'ready') return void group.forEach((rel) => accepted.set(rel, files.get(rel)!));
+      if (outcome.state === 'failed' && outcome.file && group.includes(outcome.file))
+        return add(group.filter((rel) => rel !== outcome.file));
+      if (group.length === 1) return;
+      const half = Math.ceil(group.length / 2);
+      await add(group.slice(0, half));
+      await add(group.slice(half));
+    };
+    await add([...touched]);
+    return last;
   }
 
   /** The render of exactly these files, compiled once per content. */

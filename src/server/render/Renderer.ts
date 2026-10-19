@@ -24,7 +24,7 @@ export type Compiled =
  * each side out of the snapshot, caching, reading and diffing the PDFs, anchoring comments.
  */
 export interface Renderer {
-  /** Compiler and version, which key cached renders: another compiler may lay out differently. */
+  /** Compiler, version and flags, which key cached renders: any of them may change the layout. */
   version(): Promise<string>;
   /** Compiles `entry`, a path relative to `root`, with `root` as everything the document may read. */
   compile(root: string, entry: string): Promise<Compiled>;

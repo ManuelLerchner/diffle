@@ -63,6 +63,7 @@ export function combineSource(oldSource: string, newSource: string): string {
     a.lineStarts,
     b.lineStarts,
   );
+  const lineStarts = new Set(b.lineStarts);
   let out = '';
   let from = 0;
   for (const h of hunks) {
@@ -73,7 +74,11 @@ export function combineSource(oldSource: string, newSource: string): string {
     if (!shown) continue;
     const at = b.words[h.b0]?.at ?? newSource.length;
     const lead = at === newSource.length && !/\s$/.test(newSource) ? ' ' : '';
-    out += newSource.slice(from, at) + lead + removedMarkup(shown);
+    // Before a line's first word, the words get a line of their own: `=`, `-` or `+` there still opens a
+    // heading or a list item, and the line keeps its indentation.
+    const indent = lineStarts.has(h.b0) ? /[ \t]*$/.exec(newSource.slice(0, at))![0] : null;
+    const markup = indent == null ? removedMarkup(shown) : `${removedMarkup(shown).trimEnd()}\n${indent}`;
+    out += newSource.slice(from, at) + lead + markup;
     from = at;
   }
   return out + newSource.slice(from);

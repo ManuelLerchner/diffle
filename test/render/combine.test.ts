@@ -26,6 +26,12 @@ describe('combineSource', () => {
     await expect(combineSource(old, next)).toMatchFileSnapshot('__snapshots__/combined.typ');
   });
 
+  it('gives words removed before a line their own line, so its heading or list item stays one', () => {
+    expect(combineSource('#todo[x]\n= Related <ch>\n  - a\n  - b\n', '= Related <ch>\n  - b\n')).toBe(
+      `${removedMarkup('x').trimEnd()}\n= Related <ch>\n  ${removedMarkup('- a').trimEnd()}\n  - b\n`,
+    );
+  });
+
   it('appends words removed from the end', () => {
     expect(combineSource('One two three.', 'One two')).toBe(`One two ${removedMarkup('three.')}`);
   });

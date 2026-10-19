@@ -48,6 +48,16 @@ describe('diffKeys', () => {
       for (const h of hunks) expect(h.a1 - h.a0 + h.b1 - h.b0).toBeGreaterThan(0);
     }
   });
+
+  it('keeps hunks local when the edit distance exceeds what Myers searches', () => {
+    // 3000 rewritten lines, each between two unchanged ones: a distance of 6000.
+    const a = Array.from({ length: 6000 }, (_, i) => `line ${i}`);
+    const b = a.map((x, i) => (i % 2 ? `rewritten ${i}` : x));
+    const hunks = diffKeys(a, b);
+    expect(apply(a, b, hunks)).toEqual(b);
+    expect(hunks).toHaveLength(3000);
+    expect(hunks[0]).toEqual({ a0: 1, a1: 2, b0: 1, b1: 2 });
+  });
 });
 
 describe('diffWords', () => {
