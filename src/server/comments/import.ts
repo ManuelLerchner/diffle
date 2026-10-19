@@ -1,4 +1,4 @@
-import { ThreadCreateSchema } from '@/shared/protocol.js';
+import { PdfThreadCreateSchema, SourceThreadCreateSchema } from '@/shared/protocol.js';
 import type { CommentThread, ThreadCreate } from '@/shared/protocol.js';
 
 /** A payload that is not valid JSON or not a ThreadCreate. The caller's fault. */
@@ -27,7 +27,9 @@ export function parseImports(raw: string | unknown): ThreadCreate[] {
 }
 
 function toThreadCreate(entry: unknown, where: string): ThreadCreate {
-  const result = ThreadCreateSchema.safeParse(entry);
+  // Picked by `kind`, so a malformed payload reports its own fields, not every member of the union.
+  const pdf = typeof entry === 'object' && entry != null && (entry as { kind?: unknown }).kind === 'pdf';
+  const result = (pdf ? PdfThreadCreateSchema : SourceThreadCreateSchema).safeParse(entry);
   if (!result.success)
     throw new ImportError(
       `invalid comment${where}: ${result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`,
@@ -38,7 +40,12 @@ function toThreadCreate(entry: unknown, where: string): ThreadCreate {
 /** True when `t` duplicates an open thread at the same anchor whose opening message has the same body. */
 export function isDuplicate(existing: readonly CommentThread[], t: ThreadCreate): boolean {
   const body = t.body.trim();
-  const open = existing.filter((e) => !e.resolved && e.anchor.path === t.path && e.messages[0]?.body.trim() === body);
+  const same = existing.filter((e) => !e.resolved && e.messages[0]?.body.trim() === body);
+  if ('kind' in t) {
+    const quoted = t.quoted.split(/\s+/).filter(Boolean).join(' ');
+    return same.some((e) => e.anchor.kind === 'pdf' && e.anchor.side === t.side && e.anchor.quoted === quoted);
+  }
+  const open = same.filter((e) => e.anchor.path === t.path);
   if (t.startLine == null) return open.some((e) => e.anchor.kind === 'file');
   const side = t.side ?? 'new';
   const endLine = t.endLine ?? t.startLine;

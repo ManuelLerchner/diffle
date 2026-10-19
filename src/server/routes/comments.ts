@@ -16,7 +16,7 @@ import type { ApiDeps } from './api.js';
 import { readJson } from './body.js';
 
 /** Comment threads, their export to a pending GitHub review, and viewed marks. Each write broadcasts its invalidation. */
-export function commentRoutes(app: Hono, { session, hub }: ApiDeps): void {
+export function commentRoutes(app: Hono, { session, hub, document: doc }: ApiDeps): void {
   app.get('/api/threads', (c) => {
     const q = ThreadQuerySchema.parse(c.req.query());
     q.state ??= 'all';
@@ -40,7 +40,8 @@ export function commentRoutes(app: Hono, { session, hub }: ApiDeps): void {
   // One object or an array. Returns what was created; open duplicates are skipped.
   app.post('/api/threads', async (c) => {
     const imports = parseImports(await readJson(c));
-    const { added } = await session.comments.importThreads(imports, session.anchorSource());
+    const source = { ...session.anchorSource(), ...(doc && { placePdf: doc.place.bind(doc) }) };
+    const { added } = await session.comments.importThreads(imports, source);
     if (added.length) hub.broadcast({ type: 'threads' });
     return c.json(added, 201);
   });

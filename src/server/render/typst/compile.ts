@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { join, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import type { Compiled } from '@/server/render/Renderer.js';
 
 /** Diagnostics kept from a failed compile: enough for every error of a broken edit. */
@@ -10,13 +10,15 @@ const TIMEOUT_MS = 5 * 60_000;
 
 /**
  * Compiles `entry` (relative to `root`) into `root/.diffle-out.pdf`, with `root` as Typst's project
- * root so the document reads nothing beside the tree it was given.
+ * root so the document reads nothing beside the tree it was given. `inputs` lists the files it read
+ * inside `root`, relative to it; packages and fonts live outside and are left out.
  */
 export function compileTypst(root: string, entry: string, command = 'typst'): Promise<Compiled> {
   const out = join(root, '.diffle-out.pdf');
+  const deps = join(root, '.diffle-deps.json');
   // `sys.inputs.diffle` lets a document tell a review render from its own builds, e.g. to stand in for
   // generated data no revision contains.
-  const args = ['compile', '--root', root, '--input', 'diffle=1'];
+  const args = ['compile', '--root', root, '--input', 'diffle=1', '--deps', deps, '--deps-format', 'json'];
   args.push('--diagnostic-format', 'short', join(root, entry), out);
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -39,8 +41,8 @@ export function compileTypst(root: string, entry: string, command = 'typst'): Pr
         resolve({ ok: false, message: relativize(stderr.trim(), root) || why });
         return;
       }
-      readFile(out).then(
-        (pdf) => resolve({ ok: true, pdf }),
+      void Promise.all([readFile(out), readFile(deps, 'utf8').catch(() => '{}')]).then(
+        ([pdf, json]) => resolve({ ok: true, pdf, inputs: depInputs(json, root) }),
         (e: Error) => resolve({ ok: false, message: e.message }),
       );
     });
@@ -50,6 +52,20 @@ export function compileTypst(root: string, entry: string, command = 'typst'): Pr
 /** Diagnostics name the temporary copy; the reader knows the files by their place in the project. */
 function relativize(message: string, root: string): string {
   return message.split(`${root}${sep}`).join('').split(root).join('.');
+}
+
+function depInputs(json: string, root: string): string[] {
+  try {
+    const { inputs } = JSON.parse(json) as { inputs?: unknown };
+    if (!Array.isArray(inputs)) return [];
+    return inputs
+      .filter((p): p is string => typeof p === 'string')
+      .map((p) => relative(root, resolvePath(root, p)))
+      .filter((p) => p !== '' && !p.startsWith('..') && !isAbsolute(p))
+      .map((p) => p.split(sep).join('/'));
+  } catch {
+    return [];
+  }
 }
 
 /** The compiler's version line, which keys cached renders: another compiler may lay out differently. */

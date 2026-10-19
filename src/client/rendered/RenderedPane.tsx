@@ -1,7 +1,8 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { ChevronDown, ChevronUp, FileText, LoaderCircle, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, FileText, LoaderCircle, MessageSquare, MessageSquarePlus, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { PdfRect, RenderedDocument, Side } from '@/shared/protocol.js';
+import type { CommentThread, PdfRect, RenderedDocument, Side } from '@/shared/protocol.js';
+import { pdfLabel, visibleThreads } from '@/client/model.js';
 import { useStore } from '@/client/store.js';
 import { Button } from '@/client/ui/Button.js';
 import { loadPdf, PdfPage } from './PdfPage.js';
@@ -39,6 +40,7 @@ export function RenderedPane() {
         </div>
       )}
       <Column doc={doc} side={shown} />
+      <SelectionActions />
     </section>
   );
 }
@@ -83,11 +85,13 @@ function Toolbar({ doc, side }: { doc: RenderedDocument; side: Side }) {
 /** Tints on the page, which is paper whatever the theme: the diff's hues at a strength that keeps ink readable. */
 const TINT: Record<Side, string> = { old: 'rgb(255 80 80 / 0.28)', new: 'rgb(40 180 70 / 0.28)' };
 const CARET: Record<Side, string> = { old: 'rgb(200 30 30)', new: 'rgb(20 130 50)' };
+const THREAD_TINT = 'rgb(255 200 0 / 0.35)';
 
 interface Placed {
   rect: PdfRect;
-  /** Index into the document's changes. */
-  change: number;
+  /** Index into the document's changes, or the thread the rect belongs to. */
+  change?: number;
+  thread?: CommentThread;
   /** Words that left at this change, marked in the margin beside this rect. */
   removed?: string;
 }
@@ -100,6 +104,13 @@ function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const jump = useRendered((s) => s.jump);
   const current = useRendered((s) => s.change);
+  const select = useRendered((s) => s.select);
+  const composing = useRendered((s) => s.composing);
+  const allThreads = useStore((s) => s.threads);
+  const showResolved = useStore((s) => s.showResolved);
+  const threads = useMemo(() => visibleThreads({ threads: allThreads, showResolved }), [allThreads, showResolved]);
+  const focusThread = useStore((s) => s.focusThread);
+  const focused = useStore((s) => s.focusedThread);
 
   const key = rendered?.state === 'ready' ? rendered.key : null;
   useEffect(() => {
@@ -140,8 +151,11 @@ function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
         add({ rect, change: i, ...(side === 'new' && j === 0 && c.oldText ? { removed: c.oldText } : {}) }),
       ),
     );
+    for (const t of threads)
+      if (t.anchor.kind === 'pdf' && t.anchor.side === side && !t.stale)
+        t.anchor.rects.forEach((rect) => add({ rect, thread: t }));
     return out;
-  }, [doc.changes, side]);
+  }, [doc.changes, threads, side]);
 
   // A jump lands its rect at the gaze point; positions come from the layout, not from measuring the DOM.
   useLayoutEffect(() => {
@@ -152,9 +166,29 @@ function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
     el.scrollTo({ top: box.top + rect.y * box.height - el.clientHeight * EYE_FRACTION });
   }, [jump, side, layout]);
 
+  const onMouseUp = () => {
+    const sel = window.getSelection();
+    const el = scroller.current;
+    if (!sel || sel.isCollapsed || !el || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+    if (!el.contains(range.commonAncestorContainer)) return;
+    const quoted = sel.toString();
+    const start = range.startContainer;
+    const pageEl = (start instanceof Element ? start : start.parentElement)?.closest<HTMLElement>('[data-page]');
+    if (!quoted.trim() || !pageEl) return;
+    const end = range.getClientRects();
+    const last = end[end.length - 1] ?? range.getBoundingClientRect();
+    select({ side, page: Number(pageEl.dataset.page), quoted, at: { x: last.right, y: last.bottom } });
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div ref={scroller} className="relative min-h-0 flex-1 overflow-auto bg-hover">
+      <div
+        ref={scroller}
+        className="relative min-h-0 flex-1 overflow-auto bg-hover"
+        onMouseUp={onMouseUp}
+        onScroll={() => !composing && useRendered.getState().selection && select(null)}
+      >
         {rendered == null ? (
           <Notice>Rendering…</Notice>
         ) : rendered.state === 'absent' ? (
@@ -174,7 +208,14 @@ function Column({ doc, side }: { doc: RenderedDocument; side: Side }) {
               <div key={i} style={{ marginBottom: i === layout.length - 1 ? 0 : GAP }}>
                 <PdfPage doc={pdf} page={i + 1} width={box.width} height={box.height} scale={box.scale} root={root}>
                   {(byPage.get(i + 1) ?? []).map((p, j) => (
-                    <Mark key={j} placed={p} side={side} current={p.change === current} />
+                    <Mark
+                      key={j}
+                      placed={p}
+                      side={side}
+                      current={p.change != null && p.change === current}
+                      focused={p.thread != null && p.thread.id === focused}
+                      onThread={(t) => focusThread(t.id)}
+                    />
                   ))}
                 </PdfPage>
               </div>
@@ -216,25 +257,62 @@ function Notice({ children }: { children: React.ReactNode }) {
 
 const pct = (n: number) => `${n * 100}%`;
 
-/** A change tint, or a caret where one side has no words, with the margin tab for removed words. */
-function Mark({ placed: { rect, change, removed }, side, current }: { placed: Placed; side: Side; current: boolean }) {
+/** A change tint, a caret where one side has no words, or a thread's passage with a pin in the margin. */
+function Mark({
+  placed: { rect, change, thread, removed },
+  side,
+  current,
+  focused,
+  onThread,
+}: {
+  placed: Placed;
+  side: Side;
+  current: boolean;
+  focused: boolean;
+  onThread: (t: CommentThread) => void;
+}) {
   const style = { left: pct(rect.x), top: pct(rect.y), width: pct(rect.w), height: pct(rect.h) };
+  if (change != null)
+    return (
+      <>
+        {removed != null && <RemovedMarker rect={rect} text={removed} current={current} />}
+        <div
+          data-change={change}
+          className="pointer-events-none absolute mix-blend-multiply"
+          style={{
+            ...style,
+            ...(rect.w === 0
+              ? // A caret marks where the other side's words were: on the new side, a deletion.
+                { width: 2, marginLeft: -1, background: CARET[side === 'new' ? 'old' : 'new'] }
+              : { background: TINT[side], borderRadius: 2 }),
+            outline: current ? `2px solid ${CARET[side]}` : undefined,
+            outlineOffset: 1,
+          }}
+        />
+      </>
+    );
+  if (!thread) return removed != null ? <RemovedMarker rect={rect} text={removed} current={false} /> : null;
+  const t = thread;
   return (
     <>
-      {removed != null && <RemovedMarker rect={rect} text={removed} current={current} />}
       <div
-        data-change={change}
         className="pointer-events-none absolute mix-blend-multiply"
         style={{
           ...style,
-          ...(rect.w === 0
-            ? // A caret marks where the other side's words were: on the new side, a deletion.
-              { width: 2, marginLeft: -1, background: CARET[side === 'new' ? 'old' : 'new'] }
-            : { background: TINT[side], borderRadius: 2 }),
-          outline: current ? `2px solid ${CARET[side]}` : undefined,
-          outlineOffset: 1,
+          background: THREAD_TINT,
+          boxShadow: focused ? '0 0 0 2px var(--accent)' : undefined,
         }}
       />
+      <button
+        type="button"
+        className="absolute right-1 flex cursor-pointer items-center rounded-sm border border-border bg-card p-0.5 text-accent shadow-card"
+        style={{ top: pct(rect.y) }}
+        title={t.messages[0]?.body}
+        aria-label="Show comment"
+        onClick={() => onThread(t)}
+      >
+        <MessageSquare size="0.75rem" />
+      </button>
     </>
   );
 }
@@ -264,6 +342,83 @@ function RemovedMarker({ rect, text, current }: { rect: PdfRect; text: string; c
           <div className="[text-decoration-color:rgb(200_30_30_/_0.6)] [text-decoration:line-through]">{text}</div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** The button that turns a selection into a comment, then the composer at the same spot. */
+function SelectionActions() {
+  const selection = useRendered((s) => s.selection);
+  const composing = useRendered((s) => s.composing);
+  const compose = useRendered((s) => s.compose);
+  if (!selection) return null;
+  const x = Math.min(selection.at.x, window.innerWidth - (composing ? 360 : 140));
+  const y = Math.min(selection.at.y + 6, window.innerHeight - (composing ? 220 : 40));
+  return (
+    <div className="fixed z-30" style={{ left: Math.max(8, x), top: y }}>
+      {composing ? (
+        <Composer />
+      ) : (
+        <Button
+          variant="primary"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => compose()}
+          title="Comment on the selection (c)"
+        >
+          <MessageSquarePlus size="0.8125rem" /> Comment
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function Composer() {
+  const selection = useRendered((s) => s.selection)!;
+  const submit = useRendered((s) => s.submit);
+  const cancel = useRendered((s) => s.cancel);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    try {
+      await submit(text);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const preview = selection.quoted.replace(/\s+/g, ' ').trim();
+  return (
+    <div className="w-[22rem] overflow-hidden rounded-md border border-accent bg-surface font-sans text-[0.8125rem] shadow-card">
+      <div className="flex items-center gap-2 border-b border-b-border bg-hover px-2.5 py-1 text-[0.75rem] text-muted">
+        <MessageSquare size="0.8125rem" className="flex-none text-accent" />
+        <span className="font-mono font-semibold text-foreground">{pdfLabel(selection)}</span>
+        <span className="truncate" title={preview}>
+          {preview}
+        </span>
+      </div>
+      <div className="p-2">
+        <textarea
+          autoFocus
+          className="min-h-17.5 w-full resize-y rounded-sm border border-border bg-canvas p-1.5 font-mono text-[0.75rem] leading-[1.5]"
+          value={text}
+          placeholder="Leave a comment…"
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') cancel();
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void save();
+          }}
+        />
+        <div className="mt-1.5 flex items-center justify-end gap-1.5">
+          <span className="mr-auto text-[0.75rem] text-muted">
+            <kbd>⌘/Ctrl</kbd>+<kbd>Enter</kbd> to save
+          </span>
+          <Button onClick={cancel}>Cancel</Button>
+          <Button variant="primary" onClick={() => void save()} disabled={!text.trim() || busy}>
+            Comment
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

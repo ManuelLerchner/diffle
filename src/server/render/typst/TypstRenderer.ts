@@ -1,5 +1,6 @@
-import type { Compiled, Renderer } from '@/server/render/Renderer.js';
+import type { Compiled, Renderer, SourceToken } from '@/server/render/Renderer.js';
 import { compileTypst, typstVersion } from './compile.js';
+import { typstProse } from './prose.js';
 
 /** Typst documents, compiled with the `typst` CLI. */
 export class TypstRenderer implements Renderer {
@@ -14,5 +15,9 @@ export class TypstRenderer implements Renderer {
 
   compile(root: string, entry: string): Promise<Compiled> {
     return compileTypst(root, entry, this.command);
+  }
+
+  proseTokens(path: string, contents: string): SourceToken[] | null {
+    return path.endsWith('.typ') ? typstProse(contents) : null;
   }
 }

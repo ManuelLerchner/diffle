@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Compiled, Renderer } from '@/server/render/Renderer.js';
+import { proseWords } from '@/server/render/passage.js';
+import type { Compiled, Renderer, SourceToken } from '@/server/render/Renderer.js';
 
 /**
  * A renderer for plain text, for tests that must not depend on an installed compiler: each line of
@@ -18,7 +19,12 @@ export class TextRenderer implements Renderer {
     } catch {
       return { ok: false, message: `${entry}: file not found` };
     }
-    return { ok: true, pdf: textPdf(source.split('\n')) };
+    return { ok: true, pdf: textPdf(source.split('\n')), inputs: [entry] };
+  }
+
+  proseTokens(path: string, contents: string): SourceToken[] | null {
+    if (!path.endsWith('.txt')) return null;
+    return contents.split('\n').flatMap((line, i) => proseWords(line).map((token) => ({ token, line: i + 1 })));
   }
 }
 

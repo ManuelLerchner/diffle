@@ -24,6 +24,13 @@ describe('parseImports', () => {
     }
   });
 
+  it('reads a payload of kind pdf as a passage of the rendered document, naming its own missing fields', () => {
+    const passage = { kind: 'pdf', side: 'new', page: 3, quoted: 'the solver', body: 'x' };
+    expect(parseImports(passage)).toEqual([passage]);
+    expect(() => parseImports({ ...passage, quoted: ' ' })).toThrow(/quoted: quoted required/);
+    expect(() => parseImports({ kind: 'pdf', side: 'new', quoted: 'q', body: 'x' })).toThrow(/page/);
+  });
+
   it('rejects malformed payloads with the offending index', () => {
     expect(() => parseImports('{not json')).toThrow(ImportError);
     expect(() =>

@@ -5,6 +5,7 @@ import { memo } from 'react';
 import type { CommentThread, Side } from '@/shared/protocol.js';
 import { anchorLabel } from '@/client/model.js';
 import { Markdown } from '@/client/Markdown.js';
+import { useRendered } from '@/client/rendered/state.js';
 import { ButtonLabel } from '@/client/ui/ButtonLabel.js';
 import { useConfirm } from '@/client/useConfirm.js';
 
@@ -27,7 +28,8 @@ export const ThreadRow = memo(function ThreadRow({
   const del = useConfirm(() => void deleteThread(t.id));
   const open = () => {
     // A file thread's card sits above the file's first line, where opening the file lands.
-    if (t.anchor.kind === 'line') void openFile(t.anchor.path, t.anchor.endLine, t.anchor.side);
+    if (t.anchor.kind === 'pdf') useRendered.getState().show(t);
+    else if (t.anchor.kind === 'line') void openFile(t.anchor.path, t.anchor.endLine, t.anchor.side);
     else void openFile(t.anchor.path);
     // Set after the jump: moving the cursor or selecting lines clears the ring again.
     focusThread(t.id);
@@ -86,7 +88,7 @@ export const ThreadRow = memo(function ThreadRow({
         </Button>
       </div>
       <div className="px-2.5 pt-1.5 pb-2 [&>.markdown]:font-sans [&>.markdown]:text-[0.8125rem] [&>.markdown]:leading-[1.4] [&>.markdown]:[word-break:break-word]">
-        {t.anchor.kind === 'line' && (
+        {t.anchor.kind !== 'file' && (
           <div className="m-0 mb-1.5 overflow-hidden font-mono text-[0.75rem] leading-[1.4] text-ellipsis whitespace-nowrap text-muted">
             {firstLine(t.anchor.quoted)}
           </div>
@@ -94,7 +96,7 @@ export const ThreadRow = memo(function ThreadRow({
         <Markdown
           text={first?.body ?? ''}
           path={t.anchor.path}
-          quoted={t.anchor.kind === 'line' ? t.anchor.quoted : undefined}
+          quoted={t.anchor.kind === 'file' ? undefined : t.anchor.quoted}
         />
       </div>
     </div>

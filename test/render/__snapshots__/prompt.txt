@@ -1,0 +1,15 @@
+(removed) thesis/ch/solver.typ:2 (rendered page 1, under "Solver")
+
+> computes all equations eagerly
+
+Good riddance.
+
+---
+
+thesis/ch/solver.typ:3 (rendered page 1, under "Solver")
+
+> keeps the equations it has met
+
+Say which table.
+
+---

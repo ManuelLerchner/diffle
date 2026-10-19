@@ -49,15 +49,19 @@ export function quoteRange(contents: string, startLine: number, endLine: number)
   return lines.slice(startLine - 1, endLine).join('\n');
 }
 
-/** The line a thread sorts under: a file thread comes before every line of its file. */
-export function anchorLine(anchor: CommentAnchor): number {
-  return anchor.kind === 'line' ? anchor.startLine : 0;
+/** Where a thread sorts within its path: the file first, then its lines, then the rendered document in reading order. */
+function anchorRank(anchor: CommentAnchor): [number, number] {
+  if (anchor.kind === 'file') return [0, 0];
+  if (anchor.kind === 'line') return [1, anchor.startLine];
+  return [anchor.side === 'old' ? 2 : 3, anchor.offset];
 }
 
-/** Review order: by path, then line (file threads first), then when the thread was opened. */
+/** Review order: by path, then position (see anchorRank), then when the thread was opened. */
 export function compareThreads(a: CommentThread, b: CommentThread): number {
   if (a.anchor.path !== b.anchor.path) return a.anchor.path < b.anchor.path ? -1 : 1;
-  const line = anchorLine(a.anchor) - anchorLine(b.anchor);
-  if (line !== 0) return line;
+  const [ka, pa] = anchorRank(a.anchor);
+  const [kb, pb] = anchorRank(b.anchor);
+  if (ka !== kb) return ka - kb;
+  if (pa !== pb) return pa - pb;
   return (a.messages[0]?.createdAt ?? 0) - (b.messages[0]?.createdAt ?? 0);
 }

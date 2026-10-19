@@ -16,6 +16,8 @@ export interface PdfText {
   /** Page sizes in PDF points. */
   pages: { width: number; height: number }[];
   words: PdfWord[];
+  /** Outline entries in document order, each with the index of the first word at or below its destination. */
+  headings: { title: string; word: number }[];
 }
 
 /**
@@ -85,7 +87,9 @@ export async function extractText(pdf: Uint8Array): Promise<PdfText> {
       appendWords(acc, lines, n, size);
       page.cleanup();
     }
-    return { pages, words: acc.out };
+    const words = acc.out;
+    const headings = await outline(doc, words, pages);
+    return { pages, words, headings };
   } finally {
     await task.destroy();
   }
@@ -223,4 +227,42 @@ function appendWords(acc: Words, lines: Line[], page: number, size: { width: num
     }
     flush(true);
   }
+}
+
+type PdfDocument = Awaited<ReturnType<Awaited<ReturnType<typeof pdfjs>>['getDocument']>['promise']>;
+
+interface OutlineNode {
+  title: string;
+  dest: string | unknown[] | null;
+  items: OutlineNode[];
+}
+
+/** Outline entries resolved to word indices; an entry whose destination cannot be resolved is left out. */
+async function outline(doc: PdfDocument, words: PdfWord[], pages: PdfText['pages']): Promise<PdfText['headings']> {
+  const nodes = ((await doc.getOutline()) ?? []) as OutlineNode[];
+  const flat: OutlineNode[] = [];
+  const walk = (list: OutlineNode[]) => {
+    for (const n of list) {
+      flat.push(n);
+      walk(n.items ?? []);
+    }
+  };
+  walk(nodes);
+  const out: PdfText['headings'] = [];
+  for (const node of flat) {
+    try {
+      const dest = typeof node.dest === 'string' ? await doc.getDestination(node.dest) : node.dest;
+      if (!dest?.[0]) continue;
+      const page = (await doc.getPageIndex(dest[0] as Parameters<PdfDocument['getPageIndex']>[0])) + 1;
+      const size = pages[page - 1];
+      const destTop = typeof dest[3] === 'number' && size ? 1 - dest[3] / size.height : 0;
+      const word = words.findIndex(
+        (w) => w.page > page || (w.page === page && w.rects[0]!.y + w.rects[0]!.h >= destTop),
+      );
+      if (word >= 0) out.push({ title: node.title, word });
+    } catch {
+      // A malformed destination only costs the section label.
+    }
+  }
+  return out.sort((a, b) => a.word - b.word);
 }

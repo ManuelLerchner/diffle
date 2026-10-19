@@ -388,7 +388,37 @@ export const PdfRectSchema = z.object({
 });
 export type PdfRect = z.infer<typeof PdfRectSchema>;
 
-export const CommentAnchorSchema = z.discriminatedUnion('kind', [LineAnchorSchema, FileAnchorSchema]);
+/** A source range a rendered passage was traced back to. */
+export const SourceRangeSchema = z.object({
+  path: z.string(),
+  startLine: z.number(),
+  endLine: z.number(),
+});
+export type SourceRange = z.infer<typeof SourceRangeSchema>;
+
+/**
+ * A thread on a passage of the rendered document. `quoted` is the identity; page, offset and rects
+ * locate it in the current render, and `source` names where it came from when that is unambiguous.
+ */
+export const PdfAnchorSchema = z.object({
+  kind: z.literal('pdf'),
+  /** The document's entry file. */
+  path: z.string(),
+  side: SideSchema,
+  /** The passage's words joined by single spaces. */
+  quoted: z.string(),
+  /** Index of the passage's first word in the side's text; relocation prefers the match nearest it. */
+  offset: z.number().int().nonnegative(),
+  /** 1-based page of the first word. */
+  page: z.number().int().positive(),
+  rects: PdfRectSchema.array(),
+  source: SourceRangeSchema.optional(),
+  /** The heading the passage sits under, for a reader of the export. */
+  section: z.string().optional(),
+});
+export type PdfAnchor = z.infer<typeof PdfAnchorSchema>;
+
+export const CommentAnchorSchema = z.discriminatedUnion('kind', [LineAnchorSchema, FileAnchorSchema, PdfAnchorSchema]);
 export type CommentAnchor = z.infer<typeof CommentAnchorSchema>;
 
 export const CommentMessageSchema = z.object({
@@ -415,11 +445,11 @@ export const CommentThreadSchema = z.object({
 export type CommentThread = z.infer<typeof CommentThreadSchema>;
 
 /**
- * Create payload. Without `startLine` the thread is on the file as a whole; then `side`,
+ * Create payload for a source file. Without `startLine` the thread is on the file as a whole; then `side`,
  * `endLine` and `quoted` are refused rather than ignored, so a payload that meant a line
  * never lands on the file. `quoted` is optional: the server quotes the range from the snapshot.
  */
-export const ThreadCreateSchema = z
+export const SourceThreadCreateSchema = z
   .object({
     path: z.string().min(1),
     /** Default 'new'. */
@@ -438,6 +468,22 @@ export const ThreadCreateSchema = z
     path: ['startLine'],
     message: 'side, endLine and quoted need a startLine; leave all four out for a comment on the whole file',
   });
+
+/**
+ * Create payload for a passage of the rendered document: the selected text on one side, found in the
+ * render near `page`. The server places it; a passage the render does not contain is refused.
+ */
+export const PdfThreadCreateSchema = z.object({
+  kind: z.literal('pdf'),
+  side: SideSchema,
+  /** 1-based page the selection started on. */
+  page: z.number().int().positive(),
+  quoted: z.string().refine((q) => q.trim().length > 0, 'quoted required'),
+  body: z.string().refine((body) => body.trim().length > 0, 'body required'),
+});
+export type PdfThreadCreate = z.infer<typeof PdfThreadCreateSchema>;
+
+export const ThreadCreateSchema = z.union([PdfThreadCreateSchema, SourceThreadCreateSchema]);
 export type ThreadCreate = z.infer<typeof ThreadCreateSchema>;
 
 export const ReplyCreateSchema = z.object({
@@ -802,6 +848,8 @@ export const RenderedChangeSchema = z.object({
   /** The words each side's rects cover, joined by spaces. */
   oldText: z.string(),
   newText: z.string(),
+  /** The source line the change traces to, when it traces to one place: the new side's, else the old side's. */
+  source: SourceRangeSchema.extend({ side: SideSchema }).optional(),
 });
 export type RenderedChange = z.infer<typeof RenderedChangeSchema>;
 

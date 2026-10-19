@@ -8,6 +8,8 @@ import type {
   CommentMessage,
   CommentThread,
   LineAnchor,
+  PdfAnchor,
+  PdfThreadCreate,
   ReplyCreate,
   Side,
   ThreadCreate,
@@ -60,6 +62,8 @@ export interface AnchorSource {
   quote: QuoteFn;
   /** Whether the review has a file at `path` on either side. */
   hasFile(path: string): Promise<boolean>;
+  /** Places a selection in the rendered document; absent when the review renders none. Throws UnquotableError. */
+  placePdf?(t: PdfThreadCreate): PdfAnchor;
 }
 
 export class NotFoundError extends Error {}
@@ -303,6 +307,8 @@ export class CommentStore {
       async (set) => {
         let changed = false;
         for (const t of set.threads) {
+          // The rendered document re-anchors its own threads once it has rendered: see relocatePdf.
+          if (t.anchor.kind === 'pdf') continue;
           if (t.anchor.kind === 'file') {
             const stale = !review.hasFile(t.anchor.path);
             if (stale !== t.stale) {
@@ -328,6 +334,37 @@ export class CommentStore {
             changed = true;
           }
           if (moved.startLine !== t.anchor.startLine || moved.endLine !== t.anchor.endLine) {
+            t.anchor = moved;
+            changed = true;
+          }
+        }
+        return changed;
+      },
+      (changed) => changed,
+    );
+  }
+
+  /**
+   * Re-anchor every thread on the rendered document through `place`: a new anchor moves the thread,
+   * null makes it stale, undefined leaves it as it is. Returns true if anything changed.
+   */
+  relocatePdf(place: (anchor: PdfAnchor) => PdfAnchor | null | undefined): Promise<boolean> {
+    return this.mutate(
+      (set) => {
+        let changed = false;
+        for (const t of set.threads) {
+          if (t.anchor.kind !== 'pdf') continue;
+          const moved = place(t.anchor);
+          if (moved === undefined) continue;
+          if (moved === null) {
+            if (!t.stale) changed = t.stale = true;
+            continue;
+          }
+          if (t.stale) {
+            t.stale = false;
+            changed = true;
+          }
+          if (JSON.stringify(moved) !== JSON.stringify(t.anchor)) {
             t.anchor = moved;
             changed = true;
           }
@@ -383,6 +420,10 @@ function findThread(set: SetData, id: string): CommentThread {
  * UnquotableError for a range that cannot be quoted or a file the review lacks.
  */
 async function placeImport(t: ThreadCreate, source: AnchorSource): Promise<CommentAnchor> {
+  if ('kind' in t) {
+    if (!source.placePdf) throw new UnquotableError('this review renders no document');
+    return source.placePdf(t);
+  }
   if (t.startLine == null) {
     if (!(await source.hasFile(t.path))) throw new UnquotableError(`${t.path} is not in the review`);
     return { kind: 'file', path: t.path };

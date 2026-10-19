@@ -155,7 +155,8 @@ diffle compiles the document on both sides of the comparison with
 [`typst`](https://typst.app/) from `PATH` and shows the new pages with the words an edit added
 tinted green and a red mark in the margin where words were removed. `p` switches between the
 rendered pages and the source diff, **Both** shows them side by side, and `j` / `k` step through
-the changes.
+the changes. Select text and press `c` to comment on it. The export names the source line when the
+passage traces back to one place in the `.typ` files, and the page otherwise.
 
 Each side compiles from a copy of the entry's directory as it is on that side, so files outside
 it, and gitignored ones, are not visible. A document can tell such a render apart from its own

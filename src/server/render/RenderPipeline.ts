@@ -3,7 +3,9 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
 import type {
+  PdfAnchor,
   PdfRect,
+  PdfThreadCreate,
   RenderedChange,
   RenderedDocument,
   RenderedSide,
@@ -11,16 +13,17 @@ import type {
   Side,
   Snapshot,
 } from '@/shared/protocol.js';
+import { UnquotableError } from '@/server/comments/CommentStore.js';
 import { mapLimit } from '@/server/concurrency.js';
 import type { Session } from '@/server/Session.js';
 import { diffWords } from './diff.js';
-import { spanRects } from './passage.js';
-import type { Renderer } from './Renderer.js';
+import { findPassage, firstWordOn, sectionOf, selectionKeys, sourceOf, type Span, spanRects } from './passage.js';
 import { extractText, type PdfText } from './text.js';
+import type { Renderer, SourceToken } from './Renderer.js';
 
 /** One side, compiled and read, or why it could not be. */
 type Outcome =
-  | { state: 'ready'; key: string; pdf: Buffer; text: PdfText }
+  | { state: 'ready'; key: string; pdf: Buffer; text: PdfText; sources: Map<string, SourceToken[]> }
   | { state: 'failed'; message: string }
   | { state: 'absent' };
 
@@ -96,6 +99,52 @@ export class RenderPipeline {
     while (this.running) await this.drained;
   }
 
+  /**
+   * Places a selection as an anchor in the current render. Throws UnquotableError when that side is
+   * not rendered or does not contain the text.
+   */
+  place(t: PdfThreadCreate): PdfAnchor {
+    const o = this.current?.[t.side];
+    if (o?.state !== 'ready') throw new UnquotableError(`the ${t.side} side of ${this.entry} is not rendered`);
+    const span = findPassage(o.text.words, selectionKeys(t.quoted), firstWordOn(o.text.words, t.page));
+    if (!span) throw new UnquotableError(`the ${t.side} render of ${this.entry} does not contain the selection`);
+    return this.anchorAt(o, t.side, span);
+  }
+
+  /**
+   * The anchor's passage in the current render: moved, null when the text is gone, or undefined
+   * when its side did not render, which says nothing about the passage.
+   */
+  relocate(anchor: PdfAnchor): PdfAnchor | null | undefined {
+    const o = this.current?.[anchor.side];
+    if (!o || o.state === 'failed') return undefined;
+    if (o.state === 'absent') return null;
+    const span = findPassage(o.text.words, selectionKeys(anchor.quoted), anchor.offset);
+    return span && this.anchorAt(o, anchor.side, span);
+  }
+
+  private anchorAt(o: Ready, side: Side, span: Span): PdfAnchor {
+    const words = o.text.words;
+    const quoted = words
+      .slice(span.start, span.end)
+      .map((w) => w.text)
+      .join(' ');
+    const anchor: PdfAnchor = {
+      kind: 'pdf',
+      path: this.entry,
+      side,
+      quoted,
+      offset: span.start,
+      page: (words[span.start] ?? words[span.start - 1])?.page ?? 1,
+      rects: rectsOrCaret(o.text, span.start, span.end),
+    };
+    const source = sourceOf(quoted, o.sources);
+    if (source) anchor.source = source;
+    const section = sectionOf(o.text, span.start);
+    if (section) anchor.section = section;
+    return anchor;
+  }
+
   private schedule(snap: Snapshot): void {
     this.latest = snap;
     this.queued = snap;
@@ -131,6 +180,8 @@ export class RenderPipeline {
     const changes =
       old.state === 'ready' && next.state === 'ready' ? (same ? prev.changes : changesBetween(old, next)) : [];
     this.current = { snap, old, new: next, changes };
+    if (await this.session.comments.relocatePdf((anchor) => this.relocate(anchor)))
+      this.hub.broadcast({ type: 'threads' });
     this.hub.broadcast({ type: 'document' });
   }
 
@@ -200,7 +251,16 @@ export class RenderPipeline {
       if (!compiled.ok) return { state: 'failed', message: compiled.message };
       const text = await extractText(compiled.pdf).catch((e: Error) => e);
       if (text instanceof Error) return { state: 'failed', message: `cannot read the compiled PDF: ${text.message}` };
-      return { state: 'ready', key, pdf: compiled.pdf, text };
+      // Only the files the document read, when the compiler said; else every file it could have.
+      const read = compiled.inputs.length ? compiled.inputs : [...files.keys()];
+      const sources = new Map(
+        read.flatMap((rel) => {
+          const buf = files.get(rel);
+          const tokens = buf && this.renderer.proseTokens(rel, buf.toString('utf8'));
+          return tokens ? [[this.prefix + rel, tokens] as const] : [];
+        }),
+      );
+      return { state: 'ready', key, pdf: compiled.pdf, text, sources };
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -233,6 +293,20 @@ function rectsOrCaret(t: PdfText, start: number, end: number): PdfRect[] {
   return after ? [{ ...after, w: 0 }] : [];
 }
 
+/**
+ * Words of context tried around a change, widest first, so a one-word edit still traces to its source
+ * line; narrower windows and one-sided ones keep a change near a heading or a file boundary traceable.
+ */
+const TRACE_WINDOWS: ReadonlyArray<readonly [number, number]> = [
+  [6, 6],
+  [3, 3],
+  [6, 0],
+  [0, 6],
+  [3, 0],
+  [0, 3],
+  [0, 0],
+];
+
 function changesBetween(a: Ready, b: Ready): RenderedChange[] {
   const hunks = diffWords(
     a.text.words.map((w) => w.key),
@@ -242,13 +316,27 @@ function changesBetween(a: Ready, b: Ready): RenderedChange[] {
   );
   const text = (t: PdfText, start: number, end: number) =>
     t.words
-      .slice(start, end)
+      .slice(Math.max(0, start), end)
       .map((w) => w.text)
       .join(' ');
-  return hunks.map((h) => ({
-    old: rectsOrCaret(a.text, h.a0, h.a1),
-    new: rectsOrCaret(b.text, h.b0, h.b1),
-    oldText: text(a.text, h.a0, h.a1),
-    newText: text(b.text, h.b0, h.b1),
-  }));
+  const trace = (o: Ready, start: number, end: number) => {
+    for (const [before, after] of TRACE_WINDOWS) {
+      const found = sourceOf(text(o.text, start - before, end + after), o.sources);
+      if (found) return found;
+    }
+    return null;
+  };
+  return hunks.map((h): RenderedChange => {
+    const change: RenderedChange = {
+      old: rectsOrCaret(a.text, h.a0, h.a1),
+      new: rectsOrCaret(b.text, h.b0, h.b1),
+      oldText: text(a.text, h.a0, h.a1),
+      newText: text(b.text, h.b0, h.b1),
+    };
+    const fromNew = trace(b, h.b0, h.b1);
+    const fromOld = fromNew ? null : trace(a, h.a0, h.a1);
+    if (fromNew) change.source = { ...fromNew, side: 'new' };
+    else if (fromOld) change.source = { ...fromOld, side: 'old' };
+    return change;
+  });
 }
