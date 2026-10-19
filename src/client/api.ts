@@ -40,6 +40,7 @@ import type {
   SearchContent,
   ServerMessage,
   Side,
+  Surface,
   ThreadCreate,
   ThreadQuery,
   ViewedEntry,
@@ -216,8 +217,8 @@ export const api = {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;
     }),
-  /** Where pdf.js loads one side's PDF; `key` is that side's render key. */
-  documentPdfUrl: (rev: Side, key: string) => new URL(`api/document/pdf?${q({ rev, key })}`, location.href).href,
+  /** Where pdf.js loads one surface's PDF; `key` is that surface's render key. */
+  documentPdfUrl: (rev: Surface, key: string) => new URL(`api/document/pdf?${q({ rev, key })}`, location.href).href,
   config: () => json(UserConfigSchema, 'api/config'),
   /** lspCommands is CLI-only; the server ignores it. */
   saveConfig: (config: ConfigUpdate) =>

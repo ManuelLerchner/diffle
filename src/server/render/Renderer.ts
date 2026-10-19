@@ -15,6 +15,8 @@ export type Compiled =
       ok: false;
       /** The compiler's diagnostics, for the reader. */
       message: string;
+      /** The file the first error is in, relative to its root. */
+      file?: string;
     };
 
 /**
@@ -22,13 +24,25 @@ export type Compiled =
  * each side out of the snapshot, caching, reading and diffing the PDFs, anchoring comments.
  */
 export interface Renderer {
-  /** Compiler and version, which key cached renders: another compiler may lay out differently. */
+  /** Compiler, version and flags, which key cached renders: any of them may change the layout. */
   version(): Promise<string>;
-  /** Compiles `entry`, a path relative to `root`, with `root` as everything the document may read. */
-  compile(root: string, entry: string): Promise<Compiled>;
+  /**
+   * Compiles `entry`, a path relative to `root`, with `root` as everything the document may read.
+   * Each surface compiles in one `root` for the whole run, so a renderer may keep a compiler warm on
+   * it. `write` brings `root` to the files of this compile and resolves to the paths it changed; the
+   * renderer calls it once, before reading any of them.
+   */
+  compile(root: string, entry: string, write: () => Promise<string[]>): Promise<Compiled>;
+  /** Stops what `compile` keeps running; in-flight compiles then resolve, failed or cold. */
+  close?(): Promise<void>;
   /**
    * The prose words of a source file with their lines, for tracing rendered text back to it: markup,
    * comments and references left out. Null for a file that is not a source of this format.
    */
   proseTokens(path: string, contents: string): SourceToken[] | null;
+  /**
+   * The new source of one file with the old one's removed words put back in place, marked as removed,
+   * for a render that shows removals inline. Absent when the format cannot; null for a file it leaves alone.
+   */
+  inline?(path: string, oldSource: string, newSource: string): string | null;
 }

@@ -1,7 +1,7 @@
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import { api } from '@/client/api.js';
-import type { Side } from '@/shared/protocol.js';
+import type { Surface } from '@/shared/protocol.js';
 
 type PdfLib = typeof import('pdfjs-dist');
 
@@ -22,8 +22,8 @@ function pdfjs(): Promise<PdfLib> {
 const docs = new Map<string, Promise<PDFDocumentLoadingTask>>();
 const KEEP_DOCS = 4;
 
-export function loadPdf(side: Side, key: string): Promise<PDFDocumentProxy> {
-  const url = api.documentPdfUrl(side, key);
+export function loadPdf(surface: Surface, key: string): Promise<PDFDocumentProxy> {
+  const url = api.documentPdfUrl(surface, key);
   let task = docs.get(url);
   if (!task) {
     task = pdfjs().then((p) => p.getDocument({ url }));

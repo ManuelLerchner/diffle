@@ -78,6 +78,7 @@ describe.skipIf(!hasTypst)('RenderPipeline with Typst', () => {
     await doc.settled();
   }, 60_000);
   afterAll(async () => {
+    await doc?.close();
     await session?.close();
     await rmTmp(dir);
   });
@@ -94,6 +95,29 @@ describe.skipIf(!hasTypst)('RenderPipeline with Typst', () => {
         expect(r.y).toBeGreaterThanOrEqual(0);
         expect(r.y + r.h).toBeLessThanOrEqual(1);
       }
+  });
+
+  it('typesets the removed words into a combined render and finds each change in it', () => {
+    const d = doc.document();
+    expect(d.combined?.state).toBe('ready');
+    for (const c of d.changes) {
+      expect(c.combinedAt).toBeDefined();
+      // Added words are tinted where they are; removed ones are typeset, so they need no tint.
+      expect(c.combined!.length > 0).toBe(c.newText !== '');
+    }
+  });
+
+  it('anchors a selection on the combined render to the new words it covers', () => {
+    const anchor = doc.place({
+      kind: 'pdf',
+      side: 'new',
+      page: 1,
+      combined: true,
+      // Spans a removed run ("computes all") between new words.
+      quoted: 'The solver computes all discovers equations',
+      body: 'x',
+    });
+    expect(anchor).toMatchObject({ side: 'new', quoted: 'The solver discovers equations' });
   });
 
   it('anchors a selection to its words and traces it to the source line', async () => {

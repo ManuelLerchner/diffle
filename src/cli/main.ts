@@ -409,6 +409,7 @@ async function serve(
     stopBrowserWatch();
     return Promise.all([
       session.close(),
+      document?.close(),
       Promise.race([
         Promise.allSettled([server.close(), lsp?.close()]),
         new Promise((res) => setTimeout(res, 1500).unref()),

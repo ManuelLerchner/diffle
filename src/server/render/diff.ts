@@ -6,28 +6,104 @@ export interface Hunk {
   b1: number;
 }
 
-/** Edit distance past which Myers gives up and reports the remaining middle as one replaced span. */
+/** Edit distance past which Myers gives up on a span and splits it at unique keys instead. */
 const MAX_EDITS = 2000;
 
 /**
  * Myers' shortest edit script between two key sequences, as hunks in order. The common prefix and
- * suffix are trimmed first, so a local edit in a long document costs only its own distance.
+ * suffix are trimmed first, so a local edit in a long document costs only its own distance. A span
+ * too far apart for Myers is split at keys occurring once on each side (patience diff), so a large
+ * rewrite still yields local hunks instead of one replaced span.
  */
 export function diffKeys(a: readonly string[], b: readonly string[]): Hunk[] {
-  let start = 0;
-  while (start < a.length && start < b.length && a[start] === b[start]) start++;
-  let endA = a.length;
-  let endB = b.length;
-  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
-    endA--;
-    endB--;
-  }
-  if (start === endA && start === endB) return [];
-  if (start === endA || start === endB) return [{ a0: start, a1: endA, b0: start, b1: endB }];
-  return myers(a, b, start, endA, start, endB);
+  const out: Hunk[] = [];
+  diffSpan(a, b, 0, a.length, 0, b.length, out);
+  return out;
 }
 
-function myers(a: readonly string[], b: readonly string[], a0: number, a1: number, b0: number, b1: number): Hunk[] {
+function diffSpan(
+  a: readonly string[],
+  b: readonly string[],
+  a0: number,
+  a1: number,
+  b0: number,
+  b1: number,
+  out: Hunk[],
+): void {
+  while (a0 < a1 && b0 < b1 && a[a0] === b[b0]) {
+    a0++;
+    b0++;
+  }
+  while (a1 > a0 && b1 > b0 && a[a1 - 1] === b[b1 - 1]) {
+    a1--;
+    b1--;
+  }
+  if (a0 === a1 && b0 === b1) return;
+  if (a0 === a1 || b0 === b1) return void out.push({ a0, a1, b0, b1 });
+  const script = myers(a, b, a0, a1, b0, b1);
+  if (script) return void out.push(...script);
+  const anchors = uniqueAnchors(a, b, a0, a1, b0, b1);
+  if (anchors.length === 0) return void out.push({ a0, a1, b0, b1 });
+  let x = a0;
+  let y = b0;
+  for (const [i, j] of anchors) {
+    diffSpan(a, b, x, i, y, j, out);
+    x = i + 1;
+    y = j + 1;
+  }
+  diffSpan(a, b, x, a1, y, b1, out);
+}
+
+/**
+ * Pairs `[i, j]` with `a[i] === b[j]` and the key occurring once in each span, the longest chain
+ * increasing on both sides: matches that cannot be a coincidence of repeated text.
+ */
+function uniqueAnchors(
+  a: readonly string[],
+  b: readonly string[],
+  a0: number,
+  a1: number,
+  b0: number,
+  b1: number,
+): Array<[number, number]> {
+  // Position on a side, or -1 once the key repeats there.
+  const inA = new Map<string, number>();
+  for (let i = a0; i < a1; i++) inA.set(a[i]!, inA.has(a[i]!) ? -1 : i);
+  const inB = new Map<string, number>();
+  for (let j = b0; j < b1; j++) inB.set(b[j]!, inB.has(b[j]!) ? -1 : j);
+  const pairs: Array<[number, number]> = [];
+  for (let i = a0; i < a1; i++) {
+    const j = inB.get(a[i]!);
+    if (inA.get(a[i]!) === i && j != null && j >= 0) pairs.push([i, j]);
+  }
+  // Longest increasing subsequence on `j` by patience sorting: `tails[k]` ends the best chain of length k + 1.
+  const tails: number[] = [];
+  const prev = new Int32Array(pairs.length).fill(-1);
+  for (let p = 0; p < pairs.length; p++) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pairs[tails[mid]!]![1] < pairs[p]![1]) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0) prev[p] = tails[lo - 1]!;
+    tails[lo] = p;
+  }
+  const chain: Array<[number, number]> = [];
+  for (let p = tails.at(-1) ?? -1; p >= 0; p = prev[p]!) chain.push(pairs[p]!);
+  return chain.reverse();
+}
+
+/** The hunks between `a[a0, a1)` and `b[b0, b1)`, or null past `MAX_EDITS`. */
+function myers(
+  a: readonly string[],
+  b: readonly string[],
+  a0: number,
+  a1: number,
+  b0: number,
+  b1: number,
+): Hunk[] | null {
   const n = a1 - a0;
   const m = b1 - b0;
   const max = Math.min(n + m, MAX_EDITS);
@@ -53,7 +129,7 @@ function myers(a: readonly string[], b: readonly string[], a0: number, a1: numbe
       }
     }
   }
-  if (found < 0) return [{ a0, a1, b0, b1 }];
+  if (found < 0) return null;
 
   // Walk back from (n, m): each round is one insertion or deletion plus the diagonal run before it.
   const edits: Array<{ x: number; y: number; del: boolean }> = [];
@@ -116,4 +192,29 @@ export function diffWords(
       out.push({ a0: wa0 + h.a0, a1: wa0 + h.a1, b0: wb0 + h.b0, b1: wb0 + h.b1 });
   }
   return out;
+}
+
+/**
+ * Where word `i` of `a` lands in `b`: shifted past every hunk before it, including words inserted
+ * right before it, or to its hunk's start when the hunk replaced or removed it.
+ */
+export function toNew(hunks: readonly Hunk[], i: number): number {
+  let shift = 0;
+  for (const h of hunks) {
+    if (h.a0 > i || (h.a0 === i && h.a1 > h.a0)) break;
+    if (h.a1 > i) return h.b0;
+    shift = h.b1 - h.a1;
+  }
+  return i + shift;
+}
+
+/** `toNew` the other way: where word `i` of `b` came from in `a`. */
+export function toOld(hunks: readonly Hunk[], i: number): number {
+  let shift = 0;
+  for (const h of hunks) {
+    if (h.b0 > i || (h.b0 === i && h.b1 > h.b0)) break;
+    if (h.b1 > i) return h.a0;
+    shift = h.a1 - h.b1;
+  }
+  return i + shift;
 }
