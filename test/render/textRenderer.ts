@@ -12,7 +12,8 @@ export class TextRenderer implements Renderer {
     return 'text 1';
   }
 
-  async compile(root: string, entry: string): Promise<Compiled> {
+  async compile(root: string, entry: string, write: () => Promise<string[]>): Promise<Compiled> {
+    await write();
     let source: string;
     try {
       source = await readFile(join(root, entry), 'utf8');

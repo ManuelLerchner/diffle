@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join, posix } from 'node:path';
+import { posix } from 'node:path';
 import type {
   PdfAnchor,
   PdfRect,
@@ -21,6 +19,7 @@ import { diffWords, type Hunk, toNew, toOld } from './diff.js';
 import { findPassage, firstWordOn, sectionOf, selectionKeys, sourceOf, type Span, spanRects } from './passage.js';
 import { extractText, type PdfText } from './text.js';
 import type { Renderer, SourceToken } from './Renderer.js';
+import { Workspace } from './Workspace.js';
 
 /** One side, compiled and read, or why it could not be. */
 type Outcome =
@@ -38,8 +37,11 @@ interface Rendered {
   /** Word hunks from the old side's words to the new side's; empty unless both are ready. */
   hunks: Hunk[];
   changes: RenderedChange[];
-  /** The new side with the old side's removed words typeset in place; null without changes. */
-  combined: Outcome | null;
+  /**
+   * The new side with the old side's removed words typeset in place; null without changes, undefined
+   * while it is still to be compiled.
+   */
+  combined: Outcome | null | undefined;
   /** Word hunks from the new side's words to the combined one's: the removed words it adds. */
   inlined: Hunk[];
 }
@@ -62,7 +64,8 @@ const CACHE_SIZE = 6;
 /**
  * A review's document, compiled by its `Renderer` on both sides of every snapshot. Each side is copied
  * out of the snapshot (the entry's directory, read through `Session.readSide`) into a temporary root,
- * so the compiler sees exactly the reviewed tree and never the checkout. Renders run one at a time,
+ * so the compiler sees exactly the reviewed tree and never the checkout. Each surface keeps its root
+ * for the run, so a compiler watching it sees an edit as one changed file. Renders run one at a time,
  * newest snapshot first; a side whose files did not change is not compiled again.
  */
 export class RenderPipeline {
@@ -73,6 +76,8 @@ export class RenderPipeline {
   private drained: Promise<void> = Promise.resolve();
   private cache = new Map<string, Promise<Outcome>>();
   private latest: Snapshot | null = null;
+  private workspaces = new Map<Surface, Promise<Workspace>>();
+  private closed = false;
 
   constructor(
     private readonly session: Session,
@@ -193,7 +198,17 @@ export class RenderPipeline {
     return anchor;
   }
 
+  /** Stops rendering: compilers stop, and the temporary roots are removed once the render in flight ends. */
+  async close(): Promise<void> {
+    this.closed = true;
+    this.queued = null;
+    await this.renderer.close?.();
+    await this.settled();
+    await Promise.all([...this.workspaces.values()].map(async (ws) => (await ws).remove()));
+  }
+
   private schedule(snap: Snapshot): void {
+    if (this.closed) return;
     this.latest = snap;
     this.queued = snap;
     if (this.running) return;
@@ -230,22 +245,30 @@ export class RenderPipeline {
       this.current = { ...prev, snap };
     } else if (old.state === 'ready' && next.state === 'ready') {
       const { hunks, changes } = changesBetween(old, next);
-      const combined = hunks.length && a.files && b.files ? await this.combine(a.files, b.files) : null;
-      const inlined = combined?.state === 'ready' ? alignWords(next.text, combined.text) : [];
-      if (combined?.state === 'ready') placeInline(changes, hunks, inlined, combined.text);
-      this.current = { snap, old, new: next, hunks, changes, combined, inlined };
+      const combined = hunks.length && this.renderer.inline ? undefined : null;
+      this.current = { snap, old, new: next, hunks, changes, combined, inlined: [] };
     } else {
       this.current = { snap, old, new: next, hunks: [], changes: [], combined: null, inlined: [] };
     }
     if (await this.session.comments.relocatePdf((anchor) => this.relocate(anchor)))
       this.hub.broadcast({ type: 'threads' });
     this.hub.broadcast({ type: 'document' });
+    // The sides show first. The combined render, another compile, follows unless a newer snapshot waits:
+    // its render then picks the combined one up, from here if the sides stay the same.
+    const c = this.current;
+    if (c.combined !== undefined || c.new.state !== 'ready' || this.queued || !a.files || !b.files) return;
+    const combined = await this.combine(a.files, b.files);
+    if (this.current !== c) return;
+    const inlined = combined?.state === 'ready' ? alignWords(c.new.text, combined.text) : [];
+    if (combined?.state === 'ready') placeInline(c.changes, c.hunks, inlined, combined.text);
+    this.current = { ...c, combined, inlined };
+    this.hub.broadcast({ type: 'document' });
   }
 
   /** One side's render, from the cache when its files are the ones last compiled. */
   private async side(snap: Snapshot, side: Side): Promise<SideRender> {
     const files = await this.files(snap, side);
-    return { files, outcome: files ? await this.cached(files) : { state: 'absent' } };
+    return { files, outcome: files ? await this.cached(files, side) : { state: 'absent' } };
   }
 
   /**
@@ -276,7 +299,7 @@ export class RenderPipeline {
       if (group.length === 0) return;
       const trial = new Map(accepted);
       for (const rel of group) trial.set(rel, files.get(rel)!);
-      const outcome = await this.cached(trial);
+      const outcome = await this.cached(trial, 'combined');
       if (outcome.state !== 'failed' || last?.state !== 'ready') last = outcome;
       if (outcome.state === 'ready') return void group.forEach((rel) => accepted.set(rel, files.get(rel)!));
       if (outcome.state === 'failed' && outcome.file && group.includes(outcome.file))
@@ -290,8 +313,8 @@ export class RenderPipeline {
     return last;
   }
 
-  /** The render of exactly these files, compiled once per content. */
-  private async cached(files: Map<string, Buffer>): Promise<Outcome> {
+  /** The render of exactly these files, compiled once per content, in `surface`'s root when it is not cached. */
+  private async cached(files: Map<string, Buffer>, surface: Surface): Promise<Outcome> {
     const hash = createHash('sha256').update(`${await this.renderer.version()}\0${this.entry}\0`);
     for (const [path, buf] of [...files].sort(([a], [b]) => (a < b ? -1 : 1))) {
       hash.update(`${path}\0${buf.length}\0`).update(buf);
@@ -299,7 +322,7 @@ export class RenderPipeline {
     const key = hash.digest('hex').slice(0, 32);
     let outcome = this.cache.get(key);
     if (!outcome) {
-      outcome = this.compile(key, files);
+      outcome = this.compile(key, files, surface);
       this.cache.set(key, outcome);
       while (this.cache.size > CACHE_SIZE) this.cache.delete(this.cache.keys().next().value!);
     } else {
@@ -337,33 +360,27 @@ export class RenderPipeline {
     return out.has(this.entry.slice(prefix.length)) ? out : null;
   }
 
-  private async compile(key: string, files: Map<string, Buffer>): Promise<Outcome> {
-    // realpath: the compiler reports resolved paths, and macOS links the temp directory elsewhere.
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'diffle-render-')));
-    try {
-      for (const [rel, buf] of files) {
-        const abs = join(root, rel);
-        await mkdir(dirname(abs), { recursive: true });
-        await writeFile(abs, buf);
-      }
-      const compiled = await this.renderer.compile(root, posix.basename(this.entry));
-      if (!compiled.ok)
-        return { state: 'failed', message: compiled.message, ...(compiled.file ? { file: compiled.file } : {}) };
-      const text = await extractText(compiled.pdf).catch((e: Error) => e);
-      if (text instanceof Error) return { state: 'failed', message: `cannot read the compiled PDF: ${text.message}` };
-      // Only the files the document read, when the compiler said; else every file it could have.
-      const read = compiled.inputs.length ? compiled.inputs : [...files.keys()];
-      const sources = new Map(
-        read.flatMap((rel) => {
-          const buf = files.get(rel);
-          const tokens = buf && this.renderer.proseTokens(rel, buf.toString('utf8'));
-          return tokens ? [[this.prefix + rel, tokens] as const] : [];
-        }),
-      );
-      return { state: 'ready', key, pdf: compiled.pdf, text, sources };
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+  private async compile(key: string, files: Map<string, Buffer>, surface: Surface): Promise<Outcome> {
+    let ws = this.workspaces.get(surface);
+    if (!ws) this.workspaces.set(surface, (ws = Workspace.create()));
+    const workspace = await ws;
+    const compiled = await this.renderer.compile(workspace.root, posix.basename(this.entry), () =>
+      workspace.sync(files),
+    );
+    if (!compiled.ok)
+      return { state: 'failed', message: compiled.message, ...(compiled.file ? { file: compiled.file } : {}) };
+    const text = await extractText(compiled.pdf).catch((e: Error) => e);
+    if (text instanceof Error) return { state: 'failed', message: `cannot read the compiled PDF: ${text.message}` };
+    // Only the files the document read, when the compiler said; else every file it could have.
+    const read = compiled.inputs.length ? compiled.inputs : [...files.keys()];
+    const sources = new Map(
+      read.flatMap((rel) => {
+        const buf = files.get(rel);
+        const tokens = buf && this.renderer.proseTokens(rel, buf.toString('utf8'));
+        return tokens ? [[this.prefix + rel, tokens] as const] : [];
+      }),
+    );
+    return { state: 'ready', key, pdf: compiled.pdf, text, sources };
   }
 }
 

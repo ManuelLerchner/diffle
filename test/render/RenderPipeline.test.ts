@@ -78,6 +78,7 @@ describe.skipIf(!hasTypst)('RenderPipeline with Typst', () => {
     await doc.settled();
   }, 60_000);
   afterAll(async () => {
+    await doc?.close();
     await session?.close();
     await rmTmp(dir);
   });

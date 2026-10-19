@@ -1,11 +1,13 @@
 import type { Compiled, Renderer, SourceToken } from '@/server/render/Renderer.js';
 import { combineSource } from './combine.js';
-import { compileTypst, typstVersion } from './compile.js';
+import { typstVersion } from './compile.js';
 import { typstProse } from './prose.js';
+import { TypstWatch } from './watch.js';
 
-/** Typst documents, compiled with the `typst` CLI. */
+/** Typst documents, compiled with the `typst` CLI: one warm `typst watch` per root. */
 export class TypstRenderer implements Renderer {
   private versionLine: Promise<string> | null = null;
+  private watches = new Map<string, TypstWatch>();
 
   constructor(private readonly command = 'typst') {}
 
@@ -14,8 +16,15 @@ export class TypstRenderer implements Renderer {
     return this.versionLine;
   }
 
-  compile(root: string, entry: string): Promise<Compiled> {
-    return compileTypst(root, entry, this.command);
+  compile(root: string, entry: string, write: () => Promise<string[]>): Promise<Compiled> {
+    let watch = this.watches.get(root);
+    if (!watch) this.watches.set(root, (watch = new TypstWatch(this.command, root, entry)));
+    return watch.compile(write);
+  }
+
+  async close(): Promise<void> {
+    for (const watch of this.watches.values()) watch.stop();
+    this.watches.clear();
   }
 
   proseTokens(path: string, contents: string): SourceToken[] | null {

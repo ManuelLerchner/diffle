@@ -18,6 +18,7 @@ describe.skipIf(findOnPath('typst') == null)('inline removals', () => {
   let dir: string;
   let session: Session;
   let d: RenderedDocument;
+  let doc: RenderPipeline;
 
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), 'diffle-inline-'));
@@ -43,12 +44,13 @@ describe.skipIf(findOnPath('typst') == null)('inline removals', () => {
     // The removed "3" would land in code, where Typst refuses markup.
     await write('count.typ', '#let n = 4\nThere are #n solvers.\n');
     session = new Session(await GitRepo.open(dir), hub, { watch: false, context: 3, followRefs: 'off' });
-    const doc = new RenderPipeline(session, hub, 'main.typ', new TypstRenderer());
+    doc = new RenderPipeline(session, hub, 'main.typ', new TypstRenderer());
     await session.start(await session.resolve({ kind: 'working' }));
     await doc.settled();
     d = doc.document();
   }, 60_000);
   afterAll(async () => {
+    await doc?.close();
     await session?.close();
     await rmTmp(dir);
   });

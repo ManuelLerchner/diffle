@@ -39,6 +39,7 @@ describe('RenderPipeline with any renderer', () => {
     await doc.settled();
   }, 30_000);
   afterAll(async () => {
+    await doc?.close();
     await session?.close();
     await rmTmp(dir);
   });
@@ -75,12 +76,13 @@ class InliningRenderer extends TextRenderer {
     return `${newSource}[-${oldSource.trim()}-]\n`;
   }
 
-  override async compile(root: string, entry: string) {
+  override async compile(root: string, entry: string, write: () => Promise<string[]>) {
+    await write();
     const marked: string[] = [];
     for (const f of FILES) if ((await readFile(join(root, f), 'utf8')).includes('[-')) marked.push(f);
     if (marked.length) this.trials.push(marked);
     if (marked.includes('b.txt')) return { ok: false as const, message: 'template.txt:1: no heading' };
-    return super.compile(root, entry);
+    return super.compile(root, entry, async () => []);
   }
 }
 
@@ -104,6 +106,7 @@ describe('RenderPipeline combining removals', () => {
     await doc.settled();
   }, 30_000);
   afterAll(async () => {
+    await doc?.close();
     await session?.close();
     await rmTmp(dir);
   });
