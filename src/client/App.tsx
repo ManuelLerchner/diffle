@@ -5,6 +5,8 @@ import { Header } from './header/Header.js';
 import { HelpOverlay } from './keyboard/HelpOverlay.js';
 import { useKeymap } from './keyboard/useKeymap.js';
 import { documentTitle } from './model.js';
+import { RenderedPane } from './rendered/RenderedPane.js';
+import { useRendered } from './rendered/state.js';
 import { ReviewPane } from './review/ReviewPane.js';
 import { ServerLost } from './ServerLost.js';
 import { useStore } from './store.js';
@@ -21,6 +23,7 @@ export function App() {
   const setMoved = useStore((s) => s.setMoved);
   const toast = useStore((s) => s.toast);
   const layout = useStore((s) => s.layout);
+  const renderedView = useRendered((s) => s.view);
   const setLayout = useStore((s) => s.setLayout);
   const title = useStore((s) => (s.snapshot ? documentTitle(s.snapshot, s.github.data) : 'diffle'));
   const [lost, setLost] = useState(false);
@@ -71,9 +74,11 @@ export function App() {
   useEffect(() => {
     // Every (re)connection resyncs the whole state: pushes missed while the socket was down are
     // not replayed, and the first open is the boot itself.
+    const refreshDocument = () => void useRendered.getState().refresh();
     const resync = () => {
       setLost(false);
       void boot().then(() => performance.mark('diffle:snapshot'));
+      refreshDocument();
     };
     return connectWs(
       (msg) => {
@@ -95,6 +100,9 @@ export function App() {
             break;
           case 'lsp':
             setLspStatus(msg.payload);
+            break;
+          case 'document':
+            refreshDocument();
             break;
           default:
             break;
@@ -118,7 +126,13 @@ export function App() {
           />
         </>
       )}
-      <ReviewPane />
+      {/* The rendered view covers the diff, or sits beside it, without unmounting it: the diff keeps its place. */}
+      <div
+        className={`relative grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)] ${renderedView === 'both' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)]' : 'grid-cols-[minmax(0,1fr)]'}`}
+      >
+        <ReviewPane />
+        <RenderedPane />
+      </div>
       {layout.panelVisible && (
         <>
           <div

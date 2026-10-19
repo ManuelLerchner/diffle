@@ -1,0 +1,8 @@
+- 
++ local
+
+- computes all
++ discovers
+
+- eagerly
++ on demand

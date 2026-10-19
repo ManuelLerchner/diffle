@@ -24,6 +24,7 @@ import {
   LspSymbolsResponseSchema,
   MovedSchema,
   RefsResponseSchema,
+  RenderedDocumentSchema,
   SearchResponseSchema,
   ServerMessageSchema,
   SnapshotSchema,
@@ -209,6 +210,14 @@ export const api = {
 
   /** Document symbols for a path, or workspace symbols matching a query. */
   lspSymbols: (query: SymbolsQuery) => json(LspSymbolsResponseSchema, `api/lsp/symbols?${q(query)}`),
+  /** The `--typst` document's render state, or null when the review renders none. */
+  document: () =>
+    json(RenderedDocumentSchema, 'api/document').catch((e: unknown) => {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }),
+  /** Where pdf.js loads one side's PDF; `key` is that side's render key. */
+  documentPdfUrl: (rev: Side, key: string) => new URL(`api/document/pdf?${q({ rev, key })}`, location.href).href,
   config: () => json(UserConfigSchema, 'api/config'),
   /** lspCommands is CLI-only; the server ignores it. */
   saveConfig: (config: ConfigUpdate) =>
